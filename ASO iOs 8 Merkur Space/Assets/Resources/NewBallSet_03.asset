@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3db5bee346da66b48b8843ca2fd91fb6, type: 3}
+  m_Name: NewBallSet_03
+  m_EditorClassIdentifier: 
+  SetName: Set03
+  Skins:
+  - ColorType: 0
+    BallSprite: {fileID: 21300000, guid: 2488391a508a8ea4995de30727325bca, type: 3}
+  - ColorType: 1
+    BallSprite: {fileID: 21300000, guid: aed4b86824095f84c9fd39c75a5c9c81, type: 3}
+  - ColorType: 2
+    BallSprite: {fileID: 21300000, guid: 661209ffd4060c644b982da9ed7a18f8, type: 3}
+  - ColorType: 3
+    BallSprite: {fileID: 21300000, guid: dfd0f7593b7788d48a6a8dfa09a670cc, type: 3}
+  - ColorType: 4
+    BallSprite: {fileID: 21300000, guid: 9e73a709f308a6949b37091f4a84e957, type: 3}
+  - ColorType: 5
+    BallSprite: {fileID: 21300000, guid: 98f9e32ad11496c43bd72ab3d8317171, type: 3}

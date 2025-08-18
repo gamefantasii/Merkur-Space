@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a89bfd8470ebbd14d9871c555c6a8aac, type: 3}
+  m_Name: FlaskSet
+  m_EditorClassIdentifier: 
+  Skins:
+  - ColorType: 0
+    Sprite: {fileID: 21300000, guid: d0b1c011facc3fe48aa01c7261a4b5c3, type: 3}
+  - ColorType: 1
+    Sprite: {fileID: 21300000, guid: 84c3232d61a0e62429ee282be436246f, type: 3}
+  - ColorType: 2
+    Sprite: {fileID: 21300000, guid: cc4a8e594a481294fba7d3ea2a23327c, type: 3}
+  - ColorType: 3
+    Sprite: {fileID: 21300000, guid: 2a0624c2197a9094ea3d798ab9ac2355, type: 3}
+  - ColorType: 4
+    Sprite: {fileID: 21300000, guid: e9aeed9118cefe64c8766262c35f80dd, type: 3}
+  - ColorType: 5
+    Sprite: {fileID: 21300000, guid: 6b36f6ef04115ce448393b399905c31d, type: 3}
