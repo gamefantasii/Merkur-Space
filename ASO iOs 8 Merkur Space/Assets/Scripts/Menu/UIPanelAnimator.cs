@@ -4,7 +4,7 @@ using System.Collections;
 [RequireComponent(typeof(CanvasGroup))]
 public class UIPanelAnimator : MonoBehaviour
 {
-    [Header("Анимации")]
+    [Header("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float duration = 0.25f;
     public bool startWithExpand = true;
 
@@ -38,8 +38,25 @@ public class UIPanelAnimator : MonoBehaviour
 
     public void Hide()
     {
+        if (!isActiveAndEnabled)
+        {
+            HideImmediate();
+            return;
+        }
+
         StopAllCoroutines();
         StartCoroutine(Animate(Vector3.one, Vector3.zero, 1f, 0f, () => gameObject.SetActive(false)));
+    }
+
+    public void HideImmediate()
+    {
+        if (canvasGroup == null)
+            canvasGroup = GetComponent<CanvasGroup>();
+
+        transform.localScale = Vector3.zero;
+        if (canvasGroup != null)
+            canvasGroup.alpha = 0f;
+        gameObject.SetActive(false);
     }
 
     private IEnumerator Animate(Vector3 fromScale, Vector3 toScale, float fromAlpha, float toAlpha, System.Action onComplete = null)

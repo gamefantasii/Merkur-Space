@@ -12,9 +12,9 @@ public class GameResultController : MonoBehaviour
     public GameObject losePanel;      
 
     [Header("Delays")]
-    [Tooltip("Задержка")]
+    [Tooltip("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float winDelayFallback = 0.75f;
-    [Tooltip("Задержка")]
+    [Tooltip("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float loseDelay = 4f;
 
     private bool winShown = false;
@@ -23,8 +23,8 @@ public class GameResultController : MonoBehaviour
 
     private void Awake()
     {
-        if (winPanel) winPanel.GetComponent<UIPanelAnimator>().Hide();
-        if (losePanel) losePanel.GetComponent<UIPanelAnimator>().Hide();
+        if (winPanel) winPanel.GetComponent<UIPanelAnimator>().HideImmediate();
+        if (losePanel) losePanel.GetComponent<UIPanelAnimator>().HideImmediate();
     }
 
     private void OnEnable()

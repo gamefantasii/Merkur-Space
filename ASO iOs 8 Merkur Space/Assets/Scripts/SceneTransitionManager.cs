@@ -5,10 +5,10 @@ using System.Collections.Generic;
 
 public class SceneTransitionManager : MonoBehaviour
 {
-    [Header("Шторки")]
+    [Header("пїЅпїЅпїЅпїЅпїЅпїЅ")]
     public RectTransform[] coverPanels;
 
-    [Header("Настройки времени")]
+    [Header("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float animationDuration = 0.6f;
     public float delayBeforeLoad = 0.5f;
     public float delayAfterStart = 0.5f;

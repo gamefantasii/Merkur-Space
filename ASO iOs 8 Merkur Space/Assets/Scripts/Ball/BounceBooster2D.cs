@@ -4,14 +4,14 @@ using UnityEngine;
 public class BounceBooster2D : MonoBehaviour
 {
     [Header("Boost")]
-    [Tooltip("Умножать")]
+    [Tooltip("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float boostMultiplier = 1.15f; 
-    [Tooltip("Максимальная ")]
+    [Tooltip("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ ")]
     public float maxSpeed = 12f;
 
-    [Header("Фильтр")]
+    [Header("пїЅпїЅпїЅпїЅпїЅпїЅ")]
     public LayerMask bounceLayers = ~0; 
-    [Tooltip("Минимальная")]
+    [Tooltip("пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ")]
     public float minSpeedToBoost = 0.5f;
 
     private Rigidbody2D rb;
@@ -23,7 +23,7 @@ public class BounceBooster2D : MonoBehaviour
         if (((1 << c.collider.gameObject.layer) & bounceLayers) == 0) return;
 
         if (rb == null) return;
-        var v = rb.velocity;
+        var v = rb.linearVelocity;
         if (v.sqrMagnitude < minSpeedToBoost * minSpeedToBoost) return;
 
         var n = c.GetContact(0).normal;
@@ -32,6 +32,6 @@ public class BounceBooster2D : MonoBehaviour
         if (reflected.magnitude > maxSpeed)
             reflected = reflected.normalized * maxSpeed;
 
-        rb.velocity = reflected;
+        rb.linearVelocity = reflected;
     }
 }
