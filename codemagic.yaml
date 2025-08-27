@@ -1,0 +1,86 @@
+workflows:
+  unity-ios-merspace:
+    name: Unity iOS (Merspace + OneSignal)
+    environment:
+      groups:
+        - app_store_credentials
+        - certificate_credentials
+        - unity_credentials        # если активируешь Unity на CI
+      vars:
+        UNITY_VERSION: "6000.1.5f1"                 # твоя версия Unity
+        IOS_EXPORT_PATH: "build/ios"
+        XCODE_SCHEME: "Unity-iPhone"
+        XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
+        BUNDLE_ID: "com.joams.merspace"
+        NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
+        APP_GROUP: "group.com.joams.merspace"
+        APP_STORE_APPLE_ID: "6751573211"             # возьми в App Store Connect → App Information
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Activate Unity
+        script: unity-activate
+
+      - name: Export iOS project with Unity
+        script: |
+          export IOS_EXPORT_PATH="$IOS_EXPORT_PATH"
+          /Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity \
+            -batchmode -nographics -quit \
+            -projectPath "$(pwd)" \
+            -executeMethod BuildScript.BuildiOS
+
+      - name: Install CocoaPods
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          pod repo update || true
+          pod install
+
+      - name: Set up keychain
+        script: keychain initialize
+
+      # Создаст/подтянет дистрибутивный сертификат и App Store-профили для обоих Bundle ID
+      - name: Fetch signing files (App + NSE)
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
+
+      - name: Import certs
+        script: keychain add-certificates
+
+      # Подстрахуем App Group в энтайтламентах главного таргета
+      - name: Ensure App Group entitlement (main app)
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          ENT="Unity-iPhone/Unity-iPhone.entitlements"
+          [ -f "$ENT" ] || touch "$ENT"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups:0" "$ENT" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$ENT"
+          /usr/libexec/PlistBuddy -c "Print" "$ENT" || true
+
+      - name: Apply provisioning profiles
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          xcode-project use-profiles
+
+      - name: Increment build number (by TestFlight)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          cd "$IOS_EXPORT_PATH"
+          agvtool new-version -all $((LATEST + 1))
+
+      - name: Build ipa
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/*.ipa
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
