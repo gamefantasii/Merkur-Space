@@ -5,7 +5,7 @@ workflows:
       groups:
         - unity_credentials            # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL
         - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID / KEY_IDENTIFIER / PRIVATE_KEY (.p8)
-        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY = PEM RSA (BEGIN RSA PRIVATE KEY)
+        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY = PEM RSA (-----BEGIN RSA PRIVATE KEY-----)
       vars:
         UNITY_VERSION: "6000.1.5f1"
         UNITY_CHANGESET: "923722cbbcfc"
@@ -20,36 +20,36 @@ workflows:
       cocoapods: default
 
     scripts:
-      - name: Install Unity via Hub CLI
+      - name: Install Unity via Hub CLI (if missing)
         script: |
           set -e
           HUB="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
-          # Editor
-          yes Y | "$HUB" -- --headless install --version "$UNITY_VERSION" --changeset "$UNITY_CHANGESET" -a arm64
-          # iOS Build Support
-          yes Y | "$HUB" -- --headless install-modules --version "$UNITY_VERSION" -m ios -a arm64
-          # Укажем установленную версию: локально для текущего шага и глобально для следующих
           UNITY_HOME="/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app"
-          echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
-          # Проверка наличия бинаря
+
           if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
-            echo "Unity not found at $UNITY_HOME"
-            ls -la "/Applications/Unity/Hub/Editor" || true
-            exit 1
+            echo "Unity $UNITY_VERSION not found, installing via Hub…"
+            yes Y | "$HUB" -- --headless install --version "$UNITY_VERSION" --changeset "$UNITY_CHANGESET" -a arm64
+            yes Y | "$HUB" -- --headless install-modules --version "$UNITY_VERSION" -m ios -a arm64
+          else
+            echo "Unity $UNITY_VERSION already present."
           fi
+
+          # экспорт переменной для следующих шагов
+          echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
       - name: Activate Unity license
         script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -logFile \
+          "$UNITY_HOME/Contents/MacOS/Unity" \
+            -batchmode -nographics -quit -logFile - \
             -serial "${UNITY_SERIAL}" \
             -username "${UNITY_EMAIL}" \
             -password "${UNITY_PASSWORD}"
 
-      - name: Export iOS project
+      - name: Export iOS project from Unity
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" \
-            -batchmode -nographics -quit -logFile \
+            -batchmode -nographics -quit -logFile - \
             -projectPath "$(pwd)" \
             -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
@@ -67,7 +67,7 @@ workflows:
           app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
           keychain add-certificates
 
-      - name: Apply provisioning profiles
+      - name: Apply provisioning profiles to Xcode project
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
