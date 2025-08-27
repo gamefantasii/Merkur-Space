@@ -1,82 +1,96 @@
 workflows:
   unity-ios-merspace:
-    name: Unity iOS (Merspace + OneSignal)
+    name: Unity iOS (Merspace)
     environment:
       groups:
         - app_store_credentials
         - certificate_credentials
-        - unity_credentials        # если активируешь Unity на CI
+        - unity_credentials
       vars:
-        UNITY_VERSION: "6000.1.5f1"                 # твоя версия Unity
+        UNITY_VERSION: "6000.1.5f1"        # твоя версия Unity
         IOS_EXPORT_PATH: "build/ios"
-        XCODE_SCHEME: "Unity-iPhone"
         XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
+        XCODE_PROJECT: "Unity-iPhone.xcodeproj"
+        XCODE_SCHEME: "Unity-iPhone"
         BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
-        APP_GROUP: "group.com.joams.merspace"
-        APP_STORE_APPLE_ID: "6751573211"             # возьми в App Store Connect → App Information
+        APP_STORE_APPLE_ID: "6751573211"
+        DEVELOPMENT_TEAM: "7LB2476AFZ"
       xcode: latest
       cocoapods: default
 
     scripts:
+      # 1) Активируем Unity Pro/Edu Pro
       - name: Activate Unity
-        script: unity-activate
-
-      - name: Export iOS project with Unity
         script: |
-          export IOS_EXPORT_PATH="$IOS_EXPORT_PATH"
+          unity-activate
+
+      # 2) Экспортируем iOS-проект из Unity
+      - name: Export iOS project (Unity)
+        script: |
           /Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app/Contents/MacOS/Unity \
             -batchmode -nographics -quit \
             -projectPath "$(pwd)" \
             -executeMethod BuildScript.BuildiOS
+          echo "Exported to: $IOS_EXPORT_PATH"
 
+      # 3) Устанавливаем Pods (OneSignal подтянется)
       - name: Install CocoaPods
         script: |
           cd "$IOS_EXPORT_PATH"
           pod repo update || true
           pod install
 
-      - name: Set up keychain
-        script: keychain initialize
-
-      # Создаст/подтянет дистрибутивный сертификат и App Store-профили для обоих Bundle ID
-      - name: Fetch signing files (App + NSE)
+      # 4) Подписи: ключница + автоген сертификата/профилей для APP и NSE
+      - name: Init keychain & fetch signing files
         script: |
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
+          keychain add-certificates
 
-      - name: Import certs
-        script: keychain add-certificates
-
-      # Подстрахуем App Group в энтайтламентах главного таргета
-      - name: Ensure App Group entitlement (main app)
-        script: |
-          cd "$IOS_EXPORT_PATH"
-          ENT="Unity-iPhone/Unity-iPhone.entitlements"
-          [ -f "$ENT" ] || touch "$ENT"
-          /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups:0" "$ENT" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$ENT"
-          /usr/libexec/PlistBuddy -c "Print" "$ENT" || true
-
+      # 5) Привязываем профили к проекту
       - name: Apply provisioning profiles
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
 
-      - name: Increment build number (by TestFlight)
+      # 6) Фикс под Xcode 15/16 (убрать legacy headermaps)
+      - name: Xcode 16 header maps fix
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end"
+          ruby - <<'RUBY'
+          require 'xcodeproj'
+          p = Xcodeproj::Project.open('Unity-iPhone.xcodeproj')
+          (p.build_configurations + p.targets.flat_map(&:build_configurations)).each do |cfg|
+            cfg.build_settings['ALWAYS_SEARCH_USER_PATHS'] = 'NO'
+            cfg.build_settings['USE_HEADERMAP'] = 'YES'
+          end
+          p.save
+          RUBY
+
+      # 7) Номер билда по TestFlight
+      - name: Increment build number
         script: |
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$IOS_EXPORT_PATH"
           agvtool new-version -all $((LATEST + 1))
 
+      # 8) Сборка IPA
       - name: Build ipa
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
 
+      # 9) Возвращаем лицензию Unity (чтобы не держать сид)
+      - name: Return Unity license
+        script: |
+          unity-return-license || true
+
     artifacts:
-      - build/ios/*.ipa
+      - $IOS_EXPORT_PATH/*.ipa
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
 
     publishing:
       app_store_connect:
