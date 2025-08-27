@@ -1,0 +1,54 @@
+workflows:
+  ios-workflow:
+    name: iOS Workflow1
+    environment:
+      groups:
+        - app_store_credentials          # Issuer ID, Key ID, .p8
+        - certificate_credentials        # CERTIFICATE_PRIVATE_KEY (пароль для .p12)
+      vars:
+        XCODE_PROJECT: "Aviapilot.xcodeproj"
+        XCODE_SCHEME: "Aviapilot"
+        BUNDLE_ID: "com.hamasrl.avipilot"
+        NSE_BUNDLE_ID: "com.hamasrl.avipilot.OneSignalNotificationServiceExtension"
+        APP_STORE_APPLE_ID: "6749861223"
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Init keychain
+        script: keychain initialize
+
+      # ВАЖНО: Эти две команды "создадут если нужно" сертификат и профили для обоих Bundle ID
+      - name: Fetch signing files (App + NSE)
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key-password="$CERTIFICATE_PRIVATE_KEY"
+
+      - name: Import certs into keychain
+        script: keychain add-certificates
+
+      - name: Apply provisioning profiles to Xcode project
+        script: xcode-project use-profiles
+
+      - name: Increment build number (by TestFlight)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          agvtool new-version -all $((LATEST + 1))
+
+      - name: Build ipa
+        script: |
+          if [ -d "Aviapilot.xcworkspace" ]; then
+            xcode-project build-ipa --workspace "Aviapilot.xcworkspace" --scheme "$XCODE_SCHEME"
+          else
+            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+          fi
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
