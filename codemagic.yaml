@@ -1,9 +1,9 @@
 workflows:
   unity-ios:
-    name: Unity iOS (6000.1.5f1 via Hub)
+    name: Unity iOS (6000.1.5f1 via Hub, login activation)
     environment:
       groups:
-        - unity_credentials            # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL
+        - unity_credentials            # UNITY_EMAIL / UNITY_PASSWORD / (опц.) UNITY_SERIAL
         - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID / KEY_IDENTIFIER / PRIVATE_KEY (.p8)
         - certificate_credentials      # CERTIFICATE_PRIVATE_KEY = PEM RSA (-----BEGIN RSA PRIVATE KEY-----)
       vars:
@@ -34,17 +34,28 @@ workflows:
             echo "Unity $UNITY_VERSION already present."
           fi
 
-          # экспорт переменной для следующих шагов
           echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
-      - name: Activate Unity license
+      - name: Activate Unity license (login first, serial fallback)
         script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" \
-            -batchmode -nographics -quit -logFile - \
-            -serial "${UNITY_SERIAL}" \
-            -username "${UNITY_EMAIL}" \
-            -password "${UNITY_PASSWORD}"
+          set -e
+          # 1) Пытаемся активироваться по логину (named user)
+          if "$UNITY_HOME/Contents/MacOS/Unity" \
+              -batchmode -nographics -quit -logFile - \
+              -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"; then
+            echo "Activated via sign-in (named user)."
+          # 2) Если логин провалился (например, 2FA) и задан UNITY_SERIAL — пытаемся по сериалу
+          elif [ -n "${UNITY_SERIAL:-}" ]; then
+            echo "Sign-in activation failed, trying serial…"
+            "$UNITY_HOME/Contents/MacOS/Unity" \
+              -batchmode -nographics -quit -logFile - \
+              -serial "${UNITY_SERIAL}" \
+              -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
+          else
+            echo "Sign-in activation failed and UNITY_SERIAL is not set. Check 2FA or provide UNITY_SERIAL."
+            exit 1
+          fi
 
       - name: Export iOS project from Unity
         script: |
