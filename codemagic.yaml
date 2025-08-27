@@ -8,9 +8,9 @@ workflows:
       vars:
         XCODE_PROJECT: "Aviapilot.xcodeproj"
         XCODE_SCHEME: "Aviapilot"
-        BUNDLE_ID: "com.hamasrl.avipilot"
-        NSE_BUNDLE_ID: "com.hamasrl.avipilot.OneSignalNotificationServiceExtension"
-        APP_STORE_APPLE_ID: "6749861223"
+        BUNDLE_ID: "com.joams.merspace"
+        NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
+        APP_STORE_APPLE_ID: "6751573211"
       xcode: latest
       cocoapods: default
 
@@ -52,3 +52,4 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
+
