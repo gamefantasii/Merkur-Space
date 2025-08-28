@@ -1,6 +1,6 @@
 workflows:
   unity-ios:
-    name: Unity iOS (Pro + OneSignal)
+    name: Unity iOS (Pro)
     environment:
       groups:
         - unity_credentials            # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
@@ -8,39 +8,21 @@ workflows:
         - certificate_credentials      # CERTIFICATE_PRIVATE_KEY (PEM)
       vars:
         UNITY_VERSION: "6000.0.56f1"
+        UNITY_HOME: "/Applications/Unity/Hub/Editor/6000.0.56f1/Unity.app"
         IOS_EXPORT_PATH: "build/ios"
         APP_BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
         APP_GROUP: "group.com.joams.merspace"
         APP_STORE_APPLE_ID: "6751573211"
 
-    triggering:
-      events: [push, tag]
-      branch_patterns:
-        - pattern: "develop"
-          include: true
-          source: true
-
     scripts:
-      - name: Set UNITY_HOME & show project Unity version
-        script: |
-          set -e
-          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app" >> $CM_ENV
-          if [ -f "ProjectSettings/ProjectVersion.txt" ]; then
-            PV=$(awk -F': ' '/m_EditorVersion/ {print $2; exit}' ProjectSettings/ProjectVersion.txt || true)
-            echo "Project reports Unity: ${PV:-unknown}"
-            if [ -n "$PV" ] && [ "$PV" != "$UNITY_VERSION" ]; then
-              echo "WARNING: pipeline uses $UNITY_VERSION"
-            fi
-          fi
-
       - name: Install Unity (only if missing)
         script: |
           set -e
           if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
             brew install --cask unity-hub || true
             HUB="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
-            [ -x "$HUB" ] || { echo "Unity Hub not found at $HUB"; exit 1; }
+            [ -x "$HUB" ] || { echo "Unity Hub not found"; exit 1; }
             "$HUB" -- --headless install --version "$UNITY_VERSION" --module ios || \
             "$HUB" -- --headless install-modules --version "$UNITY_VERSION" ios || true
             for i in {1..60}; do
@@ -58,20 +40,14 @@ workflows:
           "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
             -serial "${UNITY_SERIAL}" -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
 
-      - name: Check BuildScript
-        script: |
-          set -e
-          if [ ! -f "Assets/Editor/Build.cs" ]; then
-            echo "ERROR: Assets/Editor/Build.cs not found. Add BuildScript.BuildiOS."; exit 1
-          fi
-          grep -qi "BuildScript.BuildiOS" Assets/Editor/Build.cs || { echo "ERROR: BuildScript.BuildiOS not found"; exit 1; }
-
       - name: Export iOS project from Unity
         script: |
           set -e
           mkdir -p "$IOS_EXPORT_PATH"
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-            -projectPath "$(pwd)" -executeMethod BuildScript.BuildiOS
+          "$UNITY_HOME/Contents/MacOS/Unity" \
+            -batchmode -nographics -quit -logFile - \
+            -projectPath "$(pwd)" \
+            -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
           ls -la "$IOS_EXPORT_PATH" || true
 
@@ -80,12 +56,12 @@ workflows:
           set -e
           cd "$IOS_EXPORT_PATH"
           if [ ! -f "Podfile" ]; then
-            echo "Podfile not found in $IOS_EXPORT_PATH. Run EDM4U iOS Resolver before export."; exit 1
+            echo "Podfile not found. В Unity запусти External Dependency Manager (EDM4U) → iOS Resolver → Resolve и закоммить Podfile." && exit 1
           fi
           pod repo update || true
           pod install
 
-      - name: Signing files (App + NSE)
+      - name: Fetch signing files (App + NSE)
         script: |
           set -e
           keychain initialize
