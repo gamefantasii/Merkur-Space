@@ -2,22 +2,19 @@ workflows:
   unity-ios:
     name: Unity iOS (Merspace + OneSignal)
     max_build_duration: 120
+
     environment:
       groups:
-        - app_store_credentials         # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
-        - unity_credentials             # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
-        - certificate_credentials       # CERTIFICATE_PASSWORD  (пароль для .p12)
+        - unity_credentials              # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - app_store_credentials          # App Store Connect API (p8/key_id/issuer)
       vars:
         UNITY_VERSION: "6000.0.56f1"
         UNITY_HOME: "/Applications/Unity/Hub/Editor/6000.0.56f1/Unity.app"
 
-        # Пути/идентификаторы проекта
         IOS_EXPORT_PATH: "build/ios"
         BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
         APP_GROUP: "group.com.joams.merspace"
-
-        # Числовой Apple ID приложения (для авто-инкремента билда)
         APP_STORE_APPLE_ID: "6751573211"
 
       xcode: latest
@@ -26,11 +23,16 @@ workflows:
     scripts:
       - name: Show Unity info
         script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -version
+          set -e
           echo "UNITY_HOME=$UNITY_HOME"
+          "$UNITY_HOME/Contents/MacOS/Unity" -version
+          if [ -f "ProjectSettings/ProjectVersion.txt" ]; then
+            awk -F': ' '/m_EditorVersion/ {print "Project Unity: "$2; exit}' ProjectSettings/ProjectVersion.txt || true
+          fi
 
       - name: Activate Unity (serial)
         script: |
+          set -e
           "$UNITY_HOME/Contents/MacOS/Unity" \
             -batchmode -nographics -quit -logFile - \
             -serial "$UNITY_SERIAL" \
@@ -41,7 +43,7 @@ workflows:
         script: |
           set -e
           test -f "Assets/Editor/BuildScript.cs" || { echo "Missing Assets/Editor/BuildScript.cs"; exit 1; }
-          grep -qi "BuildScript.BuildiOS" Assets/Editor/BuildScript.cs || { echo "BuildScript.BuildiOS not found"; exit 1; }
+          grep -qi "BuildScript.BuildiOS" "Assets/Editor/BuildScript.cs" || { echo "BuildScript.BuildiOS not found in BuildScript.cs"; exit 1; }
 
       - name: Export iOS project from Unity
         script: |
@@ -53,7 +55,7 @@ workflows:
           echo "Exported to: $IOS_EXPORT_PATH"
           ls -la "$IOS_EXPORT_PATH" || true
 
-      - name: Install CocoaPods in export
+      - name: Install CocoaPods (in export)
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
@@ -61,22 +63,21 @@ workflows:
             pod repo update || true
             pod install
           else
-            echo "No Podfile found. Did you run EDM4U resolver before export?" && exit 1
+            echo "No Podfile in export. Запусти iOS Resolver (EDM4U) перед экспортом из Unity." >&2
+            exit 1
           fi
 
-      # ВАЖНО: создаём/скачиваем сертификаты и профили под оба Bundle ID
       - name: Fetch signing files (App + NSE)
         script: |
           set -e
+          # Создаст/скачает сертификаты и профили для обоих bundle id в стандартные папки
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create \
-            --certificate-key-password "$CERTIFICATE_PASSWORD"
+            --type IOS_APP_STORE --platform IOS --create
           app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create \
-            --certificate-key-password "$CERTIFICATE_PASSWORD"
+            --type IOS_APP_STORE --platform IOS --create
 
-          echo "Downloaded certs:"; ls -la "$HOME/Library/MobileDevice/Certificates" || true
-          echo "Downloaded profiles:"; ls -la "$HOME/Library/MobileDevice/Provisioning Profiles" || true
+          echo "Certificates:"; ls -la "$HOME/Library/MobileDevice/Certificates" || true
+          echo "Profiles:"; ls -la "$HOME/Library/MobileDevice/Provisioning Profiles" || true
 
       - name: Import Apple certificates
         script: keychain add-certificates
@@ -85,29 +86,45 @@ workflows:
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
+          # привяжем профили к проекту
           xcode-project use-profiles
 
-          # гарантируем App Group в энтайтламентах App + NSE
-          for ENT in \
-            "Unity-iPhone/Unity-iPhone.entitlements" \
-            "OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements"
-          do
-            if [ ! -f "$ENT" ]; then
-              mkdir -p "$(dirname "$ENT")"
-              /usr/libexec/PlistBuddy -c "Save" "$ENT" 2>/dev/null || true
-              touch "$ENT"
+          # утилита: создать минимальный .entitlements, если файла нет/он пустой
+          ensure_plist() {
+            local f="$1"
+            if [ ! -s "$f" ]; then
+              mkdir -p "$(dirname "$f")"
+              cat >"$f" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
+PLIST
             fi
-            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups:0" "$ENT" 2>/dev/null || true
+          }
+
+          ENT_APP="Unity-iPhone/Unity-iPhone.entitlements"
+          ENT_NSE="OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements"
+
+          ensure_plist "$ENT_APP"
+          ensure_plist "$ENT_NSE"
+
+          for ENT in "$ENT_APP" "$ENT_NSE"; do
+            /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups" "$ENT" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT"
             /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$ENT"
-            /usr/libexec/PlistBuddy -c "Print :com.apple.security.application-groups" "$ENT" || true
+            echo "Entitlements in $ENT:"
+            /usr/libexec/PlistBuddy -c "Print" "$ENT" || true
           done
 
       - name: Increment build number
         script: |
+          set -e
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$IOS_EXPORT_PATH"
-          agvtool new-version -all $((LATEST + 1))
+          agvtool new-version -all $((LATEST + 1)) || true
 
       - name: Build ipa
         script: |
@@ -119,6 +136,10 @@ workflows:
             xcode-project build-ipa --project "Unity-iPhone.xcodeproj" --scheme "Unity-iPhone"
           fi
 
+      - name: Deactivate Unity
+        script: |
+          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
+
     artifacts:
       - $IOS_EXPORT_PATH/*.ipa
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
@@ -129,8 +150,3 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
-
-    after_scripts:
-      - name: Deactivate Unity
-        script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
