@@ -3,9 +3,9 @@ workflows:
     name: Unity iOS (Merspace + OneSignal)
     environment:
       groups:
-        - app_store_credentials           # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
-        - certificate_credentials         # APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD
-        - unity_pro_credentials           # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - unity_credentials              # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - app_store_credentials          # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
+        - certificate_credentials        # APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD
       vars:
         UNITY_VERSION: "6000.0.56f1"
         IOS_EXPORT_PATH: "build/ios"
@@ -22,6 +22,7 @@ workflows:
     scripts:
       - name: Set UNITY_HOME & show project Unity version
         script: |
+          set -e
           CMENV="${CM_ENV:-$BASH_ENV}"
           touch "$CMENV"
           echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app" >> "$CMENV"
@@ -39,11 +40,13 @@ workflows:
           set -euo pipefail
           if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
             echo "Unity $UNITY_VERSION not found. Installing via Unity Hub CLI…"
+            HUB_BIN="unity-hub"
             if ! command -v unity-hub >/dev/null 2>&1; then
               brew install --cask unity-hub
+              HUB_BIN="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
             fi
-            unity-hub -- --headless install --version "$UNITY_VERSION"
-            unity-hub -- --headless install-modules --version "$UNITY_VERSION" --module ios
+            "$HUB_BIN" -- --headless install --version "$UNITY_VERSION"
+            "$HUB_BIN" -- --headless install-modules --version "$UNITY_VERSION" --module ios
           fi
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
@@ -130,7 +133,7 @@ workflows:
           make_entitlements "$ENT_APP"
           make_entitlements "$ENT_NSE"
 
-          # Ensure CODE_SIGN_ENTITLEMENTS for both targets (Ruby one-liner; no heredoc)
+          # Ensure CODE_SIGN_ENTITLEMENTS for both targets
           ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end; \
                    p=Xcodeproj::Project.open('Unity-iPhone.xcodeproj'); \
                    {'Unity-iPhone'=>'Unity-iPhone/Unity-iPhone.entitlements', \
