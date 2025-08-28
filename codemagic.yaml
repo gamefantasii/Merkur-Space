@@ -1,100 +1,111 @@
 workflows:
   unity-ios:
-    name: Unity iOS (Pro serial fallback)
+    name: Unity iOS (Pro + OneSignal)
     environment:
       groups:
         - unity_credentials            # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
         - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
-        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY (+ опц. CERTIFICATE_PASSWORD)
+        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY (PEM)
       vars:
-        UNITY_PROJECT_PATH: "ASO iOs 8 Merkur Space"   # подпапка Unity-проекта
-        IOS_EXPORT_PATH: "$CM_BUILD_DIR/build/ios"
-        XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
-        XCODE_PROJECT: "Unity-iPhone.xcodeproj"
-        XCODE_SCHEME: "Unity-iPhone"
-        BUNDLE_ID: "com.joams.merspace"
+        UNITY_VERSION: "6000.0.56f1"
+        IOS_EXPORT_PATH: "build/ios"   # Куда BuildScript экспортирует Xcode-проект
+        APP_BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
+        APP_GROUP: "group.com.joams.merspace"
         APP_STORE_APPLE_ID: "6751573211"
-      xcode: 16.4
-      cocoapods: default
+
+    triggering:
+      events: [push, tag]
+      branch_patterns:
+        - pattern: "develop"
+          include: true
+          source: true
 
     scripts:
-      - name: Detect Unity version from ProjectVersion.txt
+      - name: Set UNITY_HOME & show project Unity version
         script: |
           set -e
-          PV="$UNITY_PROJECT_PATH/ProjectSettings/ProjectVersion.txt"
-          [ -f "$PV" ] || { echo "No ProjectVersion.txt at $PV"; exit 1; }
-          REQ_VER="$(sed -n 's/^m_EditorVersion:[[:space:]]*//p' "$PV" | head -n1)"
-          [ -n "$REQ_VER" ] || { echo "Cannot parse Unity version"; exit 1; }
-          echo "UNITY_VERSION=$REQ_VER" | tee -a "$CM_ENV"
-          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$REQ_VER/Unity.app" | tee -a "$CM_ENV"
-          echo "IOS_EXPORT_PATH=$IOS_EXPORT_PATH" | tee -a "$CM_ENV"
-          mkdir -p "$IOS_EXPORT_PATH"
+          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app" >> $CM_ENV
+          if [ -f "ProjectSettings/ProjectVersion.txt" ]; then
+            PV=$(awk -F': ' '/m_EditorVersion/ {print $2; exit}' ProjectSettings/ProjectVersion.txt || true)
+            echo "Project reports Unity: ${PV:-unknown}"
+            [ -n "$PV" ] && [ "$PV" != "$UNITY_VERSION" ] && echo "WARNING: pipeline uses $UNITY_VERSION"
+          fi
 
       - name: Install Unity (only if missing)
         script: |
           set -e
-          if [ -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
-            "$UNITY_HOME/Contents/MacOS/Unity" -version
-            exit 0
-          fi
-          if ! command -v unity-hub >/dev/null 2>&1; then
+          if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
             brew install --cask unity-hub || true
-          fi
-          unity-hub install --version "$UNITY_VERSION" --module iOS || true
-          [ -x "$UNITY_HOME/Contents/MacOS/Unity" ] || { echo "Unity not found at $UNITY_HOME"; exit 1; }
-          "$UNITY_HOME/Contents/MacOS/Unity" -version
-
-      - name: Activate Unity (login, fallback to serial)
-        script: |
-          set -e
-          if "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-               -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"; then
-            echo "Activated via sign-in."
-          elif [ -n "${UNITY_SERIAL:-}" ]; then
-            "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-              -serial "${UNITY_SERIAL}" -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
-            echo "Activated via serial."
+            HUB="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
+            [ -x "$HUB" ] || { echo "Unity Hub not found at $HUB"; exit 1; }
+            "$HUB" -- --headless install --version "$UNITY_VERSION" --module ios || \
+            "$HUB" -- --headless install-modules --version "$UNITY_VERSION" ios || true
+            for i in {1..60}; do
+              [ -x "$UNITY_HOME/Contents/MacOS/Unity" ] && break
+              echo "Waiting Unity install... ($i/60)"; sleep 10
+            done
+            [ -x "$UNITY_HOME/Contents/MacOS/Unity" ] || { echo "Unity not installed"; exit 1; }
           else
-            echo "No valid Unity license (need UNITY_SERIAL or sign-in)." && exit 1
+            echo "Unity $UNITY_VERSION already installed."
           fi
 
-      - name: Export iOS project
+      - name: Activate Unity (Pro serial)
         script: |
           set -e
-          # Требуется метод BuildScript.BuildiOS() в Assets/Editor/Build.cs
           "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-            -projectPath "$UNITY_PROJECT_PATH" -executeMethod BuildScript.BuildiOS
-          echo "Exported to: $IOS_EXPORT_PATH"
-          /bin/ls -la "$IOS_EXPORT_PATH" || true
+            -serial "${UNITY_SERIAL}" -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
 
-      - name: Install CocoaPods
+      - name: Check BuildScript
+        script: |
+          set -e
+          if [ ! -f "Assets/Editor/Build.cs" ]; then
+            echo "ERROR: Assets/Editor/Build.cs not found. Add BuildScript.BuildiOS."; exit 1
+          fi
+          grep -qi "BuildScript.BuildiOS" Assets/Editor/Build.cs || { echo "ERROR: BuildScript.BuildiOS not found"; exit 1; }
+
+      - name: Export iOS project from Unity
+        script: |
+          set -e
+          mkdir -p "$IOS_EXPORT_PATH"
+          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
+            -projectPath "$(pwd)" -executeMethod BuildScript.BuildiOS
+          echo "Exported to: $IOS_EXPORT_PATH"
+          ls -la "$IOS_EXPORT_PATH" || true
+
+      - name: Install CocoaPods (from export)
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
-          [ -f "Podfile" ] || { echo "Podfile not found. Run EDM4U iOS Resolver in Unity and commit plugin updates."; exit 1; }
+          if [ ! -f "Podfile" ]; then
+            echo "Podfile not found in $IOS_EXPORT_PATH. Run EDM4U iOS Resolver before export."; exit 1
+          fi
           pod repo update || true
           pod install
 
-      - name: Keychain & fetch signing (App + NSE)
+      - name: Signing files (App + NSE)
         script: |
           set -e
           keychain initialize
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create \
-            --certificate-key @env:CERTIFICATE_PRIVATE_KEY ${CERTIFICATE_PASSWORD:+--certificate-key-password "$CERTIFICATE_PASSWORD"}
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create \
-            --certificate-key @env:CERTIFICATE_PRIVATE_KEY ${CERTIFICATE_PASSWORD:+--certificate-key-password "$CERTIFICATE_PASSWORD"}
+          app-store-connect fetch-signing-files "$APP_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
           keychain add-certificates
 
-      - name: Apply provisioning to Xcode project
+      - name: Apply provisioning & entitlements
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
+          ENT_APP="Unity-iPhone/Unity-iPhone.entitlements"
+          ENT_NSE="OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements"
+          for ENT in "$ENT_APP" "$ENT_NSE"; do
+            [ -f "$ENT" ] || touch "$ENT"
+            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups:0" "$ENT" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$ENT"
+          done
 
-      - name: Increment build number
+      - name: Bump build number
         script: |
           set -e
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
@@ -105,19 +116,15 @@ workflows:
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
-          if [ -d "$XCODE_WORKSPACE" ]; then
-            xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+          if [ -e "Unity-iPhone.xcworkspace" ]; then
+            xcode-project build-ipa --workspace "Unity-iPhone.xcworkspace" --scheme "Unity-iPhone"
           else
-            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+            xcode-project build-ipa --project "Unity-iPhone.xcodeproj" --scheme "Unity-iPhone"
           fi
 
-      - name: Deactivate Unity license
-        script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
-
     artifacts:
-      - "$IOS_EXPORT_PATH/*.ipa"
-      - "$HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM"
+      - $IOS_EXPORT_PATH/*.ipa
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
 
     publishing:
       app_store_connect:
