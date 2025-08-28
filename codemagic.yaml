@@ -3,8 +3,9 @@ workflows:
     name: Unity iOS (Merspace + OneSignal)
     environment:
       groups:
-        - app_store_credentials         # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
-        - certificate_credentials       # APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD
+        - app_store_credentials           # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
+        - certificate_credentials         # APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD
+        - unity_pro_credentials           # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
       vars:
         UNITY_VERSION: "6000.0.56f1"
         IOS_EXPORT_PATH: "build/ios"
@@ -46,11 +47,11 @@ workflows:
           fi
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
-      - name: Activate Unity license (serial)
+      - name: Activate Unity (Pro serial)
         script: |
           set -e
-          if [ -z "${UNITY_SERIAL:-}" ]; then
-            echo "UNITY_SERIAL is not set. Add your Unity Pro serial to environment variables." >&2
+          if [ -z "${UNITY_SERIAL:-}" ] || [ -z "${UNITY_EMAIL:-}" ] || [ -z "${UNITY_PASSWORD:-}" ]; then
+            echo "UNITY_SERIAL / UNITY_EMAIL / UNITY_PASSWORD not set." >&2
             exit 1
           fi
           "$UNITY_HOME/Contents/MacOS/Unity" \
@@ -59,20 +60,20 @@ workflows:
             -username "${UNITY_EMAIL}" \
             -password "${UNITY_PASSWORD}"
 
-      - name: Sanity check BuildScript
+      - name: Check BuildScript
         script: |
           set -e
           if [ ! -f "Assets/Editor/BuildScript.cs" ]; then
-            echo "ERROR: Assets/Editor/BuildScript.cs not found. Commit BuildScript.BuildiOS." >&2
+            echo "ERROR: Assets/Editor/BuildScript.cs not found (must contain BuildScript.BuildiOS)." >&2
             exit 1
           fi
           grep -qi "BuildScript.BuildiOS" Assets/Editor/BuildScript.cs || {
-            echo "ERROR: BuildScript.BuildiOS method not found in BuildScript.cs" >&2; exit 1; }
+            echo "ERROR: BuildScript.BuildiOS not found in BuildScript.cs" >&2; exit 1; }
 
       - name: Init keychain
         script: keychain initialize
 
-      - name: Import Apple certificates to keychain
+      - name: Import Apple certificates
         script: keychain add-certificates
 
       - name: Fetch signing files (App + NSE)
@@ -99,30 +100,29 @@ workflows:
             pod repo update || true
             pod install
           else
-            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Run EDM4U iOS Resolver before export." >&2
+            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Run EDM4U → iOS Resolver before export." >&2
             exit 1
           fi
 
-      - name: Apply provisioning & entitlements (App + NSE)
+      - name: Apply provisioning & entitlements
         script: |
           set -euo pipefail
           cd "$IOS_EXPORT_PATH"
 
-          # Apply provisioning to Xcode project
+          # Apply provisioning to Xcode project (uses profiles fetched earlier)
           xcode-project use-profiles
 
           make_entitlements() {
             local path="$1"
             mkdir -p "$(dirname "$path")"
-            # Create empty plist if missing/corrupt
+            # Create empty plist if missing or broken
             if ! /usr/libexec/PlistBuddy -c "Print" "$path" >/dev/null 2>&1; then
               plutil -create xml1 "$path"
             fi
             /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups" "$path" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$path" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$path"
-            echo "Entitlements at $path:"
-            /usr/libexec/PlistBuddy -c "Print" "$path" || true
+            echo "Entitlements at $path:"; /usr/libexec/PlistBuddy -c "Print" "$path" || true
           }
 
           ENT_APP="Unity-iPhone/Unity-iPhone.entitlements"
@@ -130,27 +130,17 @@ workflows:
           make_entitlements "$ENT_APP"
           make_entitlements "$ENT_NSE"
 
-          # Ensure CODE_SIGN_ENTITLEMENTS set for both targets
-          ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end"
-          ruby - <<'RUBY'
-            require 'xcodeproj'
-            p = Xcodeproj::Project.open('Unity-iPhone.xcodeproj')
-            map = {
-              'Unity-iPhone' => 'Unity-iPhone/Unity-iPhone.entitlements',
-              'OneSignalNotificationServiceExtension' => 'OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements'
-            }
-            map.each do |tname, ent|
-              if (t = p.targets.find { |x| x.name == tname })
-                t.build_configurations.each { |cfg| cfg.build_settings['CODE_SIGN_ENTITLEMENTS'] = ent }
-              end
-            end
-            p.save
-RUBY
+          # Ensure CODE_SIGN_ENTITLEMENTS for both targets (Ruby one-liner; no heredoc)
+          ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end; \
+                   p=Xcodeproj::Project.open('Unity-iPhone.xcodeproj'); \
+                   {'Unity-iPhone'=>'Unity-iPhone/Unity-iPhone.entitlements', \
+                    'OneSignalNotificationServiceExtension'=>'OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements' \
+                   }.each{|tname,ent| t=p.targets.find{|x| x.name==tname}; if t; t.build_configurations.each{|cfg| cfg.build_settings['CODE_SIGN_ENTITLEMENTS']=ent}; end}; p.save"
 
           xcodebuild -project "$XCODE_PROJECT" -target "Unity-iPhone" -showBuildSettings | /usr/bin/grep CODE_SIGN_ENTITLEMENTS || true
           xcodebuild -project "$XCODE_PROJECT" -target "OneSignalNotificationServiceExtension" -showBuildSettings | /usr/bin/grep CODE_SIGN_ENTITLEMENTS || true
 
-      - name: Increment build number (TestFlight +1)
+      - name: Increment build number (+1 from TestFlight)
         script: |
           set -e
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
