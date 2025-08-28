@@ -1,45 +1,80 @@
 workflows:
   unity-ios:
-    name: Unity iOS (Merspace)
+    name: Unity iOS (Pro, serial key)
     environment:
-      unity: "6000.1.5f1"   # <-- твоя версия Unity
       groups:
-        - unity_credentials           # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL
-        - app_store_credentials       # APP_STORE_CONNECT_ISSUER_ID / KEY_IDENTIFIER / PRIVATE_KEY (.p8)
-        - certificate_credentials     # CERTIFICATE_PRIVATE_KEY = PEM RSA (BEGIN RSA PRIVATE KEY)
+        # unity_credentials: UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL (SC-…)
+        - unity_credentials
+        # app_store_credentials: APP_STORE_CONNECT_ISSUER_ID / APP_STORE_CONNECT_KEY_IDENTIFIER / APP_STORE_CONNECT_PRIVATE_KEY (.p8)
+        - app_store_credentials
+        # certificate_credentials: CERTIFICATE_PRIVATE_KEY = ваш PEM RSA ключ (-----BEGIN RSA PRIVATE KEY-----)
+        - certificate_credentials
       vars:
+        UNITY_VERSION: "6000.1.5f1"
+        UNITY_CHANGESET: "923722cbbcfc"
+
         IOS_EXPORT_PATH: "build/ios"
         XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
         XCODE_PROJECT: "Unity-iPhone.xcodeproj"
         XCODE_SCHEME: "Unity-iPhone"
+
         BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
         APP_STORE_APPLE_ID: "6751573211"
+
       xcode: latest
       cocoapods: default
 
     scripts:
-      - name: Activate Unity license
+      # Ставим нужную Unity + iOS-модуль (если ещё нет), задаём UNITY_HOME
+      - name: Install Unity via Hub CLI (if missing)
         script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -logFile \
+          set -e
+          HUB="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
+          UNITY_HOME="/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app"
+
+          if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
+            echo "Unity $UNITY_VERSION not found, installing via Hub…"
+            yes Y | "$HUB" -- --headless install --version "$UNITY_VERSION" --changeset "$UNITY_CHANGESET" -a arm64
+            yes Y | "$HUB" -- --headless install-modules --version "$UNITY_VERSION" -m ios -a arm64
+          else
+            echo "Unity $UNITY_VERSION already present."
+          fi
+
+          echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
+          "$UNITY_HOME/Contents/MacOS/Unity" -version
+
+      # На всякий случай освобождаем залипшую активацию (если была)
+      - name: Pre-clean Unity license (best effort)
+        script: |
+          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
+
+      # АКТИВАЦИЯ ПО СЕРИАЛУ (SC-…)
+      - name: Activate Unity license (serial)
+        script: |
+          "$UNITY_HOME/Contents/MacOS/Unity" \
+            -batchmode -nographics -quit -logFile - \
             -serial "${UNITY_SERIAL}" \
             -username "${UNITY_EMAIL}" \
             -password "${UNITY_PASSWORD}"
 
+      # Экспорт iOS-проекта из Unity
       - name: Export iOS project from Unity
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" \
-            -batchmode -nographics -quit -logFile \
+            -batchmode -nographics -quit -logFile - \
             -projectPath "$(pwd)" \
             -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
 
+      # CocoaPods (OneSignal подтянется из Podfile, созданного EDM4U → iOS Resolver)
       - name: Install CocoaPods
         script: |
           cd "$IOS_EXPORT_PATH"
           pod repo update || true
           pod install
 
+      # Подписи: ключница + автоген профилей для App и NSE
       - name: Setup signing (keychain & provisioning profiles)
         script: |
           keychain initialize
@@ -47,23 +82,31 @@ workflows:
           app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
           keychain add-certificates
 
-      - name: Apply provisioning profiles to Xcode project
+      # Применяем профили к Xcode-проекту
+      - name: Apply provisioning profiles
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
 
+      # Инкремент номера билда по TestFlight
       - name: Increment build number (TestFlight)
         script: |
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$IOS_EXPORT_PATH"
           agvtool new-version -all $((LATEST + 1))
 
+      # Сборка IPA
       - name: Build IPA
         script: |
           cd "$IOS_EXPORT_PATH"
-          xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+          if [ -d "$XCODE_WORKSPACE" ]; then
+            xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+          else
+            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+          fi
 
     publishing:
+      # Возвращаем лицензию после билда, чтобы не держать слот
       scripts:
         - name: Deactivate Unity license
           script: |
