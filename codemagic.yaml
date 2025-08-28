@@ -5,12 +5,12 @@ workflows:
       groups:
         - unity_credentials            # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL (SC-…)
         - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID / KEY_IDENTIFIER / PRIVATE_KEY (.p8)
-        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY = -----BEGIN RSA PRIVATE KEY-----
+        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY (PEM: -----BEGIN RSA PRIVATE KEY-----)
       vars:
         UNITY_VERSION: "6000.1.5f1"
         UNITY_CHANGESET: "923722cbbcfc"
 
-        IOS_EXPORT_PATH: "build/ios"
+        # Эти имена файлов в экспортированном Xcode-проекте Unity по умолчанию
         XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
         XCODE_PROJECT: "Unity-iPhone.xcodeproj"
         XCODE_SCHEME: "Unity-iPhone"
@@ -38,6 +38,28 @@ workflows:
           echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
+      - name: Detect Unity project & set absolute export path
+        script: |
+          set -e
+          ROOT="$(pwd)"
+          # Если UNITY_PROJECT_PATH уже задан и корректен — используем его
+          if [ -n "${UNITY_PROJECT_PATH:-}" ] && [ -d "$UNITY_PROJECT_PATH/Assets" ] && [ -d "$UNITY_PROJECT_PATH/ProjectSettings" ]; then
+            USE="$UNITY_PROJECT_PATH"
+          else
+            # Ищем папку с Assets/ и ProjectSettings/ (до 3 уровней)
+            USE="$(find "$ROOT" -maxdepth 3 -type d -name Assets -prune -print \
+                | while read d; do P="$(dirname "$d")"; [ -d "$P/ProjectSettings" ] && echo "$P"; done | head -n1)"
+          fi
+          if [ -z "$USE" ]; then
+            echo "ERROR: Unity project not found (no Assets/ and ProjectSettings/ under repo)."; exit 1
+          fi
+          echo "UNITY_PROJECT_PATH=$USE" | tee -a "$CM_ENV"
+          # Абсолютный путь экспорта, чтобы BuildScript не зависел от CWD
+          echo "IOS_EXPORT_PATH=$CM_BUILD_DIR/build/ios" | tee -a "$CM_ENV"
+          mkdir -p "$CM_BUILD_DIR/build/ios"
+          echo "Detected Unity project at: $USE"
+          ls -la "$USE"
+
       - name: Pre-clean Unity license (best effort)
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
@@ -50,29 +72,31 @@ workflows:
             -username "${UNITY_EMAIL}" \
             -password "${UNITY_PASSWORD}"
 
+      - name: Sanity check BuildScript
+        script: |
+          set -e
+          if [ ! -f "$UNITY_PROJECT_PATH/Assets/Editor/Build.cs" ]; then
+            echo "ERROR: $UNITY_PROJECT_PATH/Assets/Editor/Build.cs not found. Commit BuildScript.BuildiOS." && exit 1
+          fi
+          grep -q "BuildScript.BuildiOS" "$UNITY_PROJECT_PATH/Assets/Editor/Build.cs" || {
+            echo "ERROR: Build.cs must contain method BuildScript.BuildiOS" && exit 1; }
+
       - name: Export iOS project from Unity
         script: |
           set -e
           "$UNITY_HOME/Contents/MacOS/Unity" \
             -batchmode -nographics -quit -logFile - \
-            -projectPath "$(pwd)" \
+            -projectPath "$UNITY_PROJECT_PATH" \
             -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
-          # Диагностика: покажем структуру экспорта
           /bin/ls -la "$IOS_EXPORT_PATH" || true
           /usr/bin/find "$IOS_EXPORT_PATH" -maxdepth 1 -type f -name "Podfile" -print || true
 
       - name: Verify export & Podfile
         script: |
           set -e
-          if [ ! -d "$IOS_EXPORT_PATH" ]; then
-            echo "ERROR: Export path $IOS_EXPORT_PATH not found. Проверь BuildScript.BuildiOS и переменную IOS_EXPORT_PATH." && exit 1
-          fi
-          if [ ! -f "$IOS_EXPORT_PATH/Podfile" ]; then
-            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Убедись, что EDM4U/OneSignal установлены и Force Resolve сработал до/во время экспорта."
-            echo "Подсказка: проверь, что плагины EDM4U/OneSignal есть в проекте и их постпроцесс включён."
-            exit 1
-          fi
+          [ -d "$IOS_EXPORT_PATH" ] || { echo "ERROR: $IOS_EXPORT_PATH not found"; exit 1; }
+          [ -f "$IOS_EXPORT_PATH/Podfile" ] || { echo "ERROR: Podfile not found in $IOS_EXPORT_PATH (EDM4U/OneSignal resolver didn't run)."; exit 1; }
 
       - name: Install CocoaPods
         script: |
@@ -92,6 +116,21 @@ workflows:
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
+
+      # (Необязательно, но полезно для Xcode 16): снимаем устаревшие headermaps
+      - name: Fix headermap settings for Xcode 16
+        script: |
+          cd "$IOS_EXPORT_PATH"
+          ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end"
+          ruby - <<'RUBY'
+          require 'xcodeproj'
+          proj = Xcodeproj::Project.open('Unity-iPhone.xcodeproj')
+          (proj.build_configurations + proj.targets.flat_map(&:build_configurations)).each do |cfg|
+            cfg.build_settings['ALWAYS_SEARCH_USER_PATHS'] = 'NO'
+            cfg.build_settings['USE_HEADERMAP'] = 'YES'
+          end
+          proj.save
+          RUBY
 
       - name: Increment build number (TestFlight)
         script: |
