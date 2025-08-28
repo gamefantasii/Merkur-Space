@@ -4,21 +4,16 @@ workflows:
     environment:
       groups:
         - app_store_credentials         # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
-        - certificate_credentials       # APPLE_CERTIFICATE (base64 .p12) и APPLE_CERTIFICATE_PASSWORD
-        - unity_credentials             # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL (твоя Pro лицензия)
+        - certificate_credentials       # APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD
       vars:
         UNITY_VERSION: "6000.0.56f1"
-        # Путь экспорта Xcode-проекта из Unity (должен совпадать с путём в твоём BuildScript.cs)
         IOS_EXPORT_PATH: "build/ios"
-        # Бандлы и группа
         BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
         APP_GROUP: "group.com.joams.merspace"
-        # Xcode-имена
         XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
         XCODE_PROJECT: "Unity-iPhone.xcodeproj"
         XCODE_SCHEME: "Unity-iPhone"
-        # App Store Connect numeric Apple ID приложения
         APP_STORE_APPLE_ID: "6751573211"
       xcode: 16.4
       cocoapods: default
@@ -26,12 +21,16 @@ workflows:
     scripts:
       - name: Set UNITY_HOME & show project Unity version
         script: |
-          # Не падаем, просто записываем переменную окружения
-          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app" >> "$CM_ENV"
+          CMENV="${CM_ENV:-$BASH_ENV}"
+          touch "$CMENV"
+          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$UNITY_VERSION/Unity.app" >> "$CMENV"
           echo "Using Unity: $UNITY_VERSION"
           if [ -f "ProjectSettings/ProjectVersion.txt" ]; then
             PV=$(awk -F': ' '/m_EditorVersion/ {print $2; exit}' ProjectSettings/ProjectVersion.txt || true)
             echo "Project reports Unity: ${PV:-unknown}"
+            if [ -n "$PV" ] && [ "$PV" != "$UNITY_VERSION" ]; then
+              echo "WARNING: Project version differs from pipeline UNITY_VERSION."
+            fi
           fi
 
       - name: Install Unity (only if missing)
@@ -50,6 +49,10 @@ workflows:
       - name: Activate Unity license (serial)
         script: |
           set -e
+          if [ -z "${UNITY_SERIAL:-}" ]; then
+            echo "UNITY_SERIAL is not set. Add your Unity Pro serial to environment variables." >&2
+            exit 1
+          fi
           "$UNITY_HOME/Contents/MacOS/Unity" \
             -batchmode -nographics -quit -logFile - \
             -serial "${UNITY_SERIAL}" \
@@ -75,21 +78,18 @@ workflows:
       - name: Fetch signing files (App + NSE)
         script: |
           set -e
-          # Профили подтянутся/создадутся под установленный в кейчейне дистрибутивный сертификат
           app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
           app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --create
 
       - name: Export iOS project from Unity
         script: |
           set -e
-          echo "Project path: $CM_BUILD_DIR"
           "$UNITY_HOME/Contents/MacOS/Unity" \
             -batchmode -nographics -quit -logFile - \
             -projectPath "$CM_BUILD_DIR" \
             -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
           test -d "$IOS_EXPORT_PATH" || { echo "Export not found at $IOS_EXPORT_PATH" >&2; exit 1; }
-          ls -la "$IOS_EXPORT_PATH" || true
 
       - name: Install CocoaPods
         script: |
@@ -108,27 +108,20 @@ workflows:
           set -euo pipefail
           cd "$IOS_EXPORT_PATH"
 
-          # Привязать профили к проекту
+          # Apply provisioning to Xcode project
           xcode-project use-profiles
 
           make_entitlements() {
             local path="$1"
             mkdir -p "$(dirname "$path")"
-            # Если файл пуст/битый — создаём минимальный plist
+            # Create empty plist if missing/corrupt
             if ! /usr/libexec/PlistBuddy -c "Print" "$path" >/dev/null 2>&1; then
-              cat > "$path" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict/>
-</plist>
-PLIST
+              plutil -create xml1 "$path"
             fi
-            # Перезаписать App Group
             /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups" "$path" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$path" 2>/dev/null || true
             /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$path"
-            echo ">>> $path"
+            echo "Entitlements at $path:"
             /usr/libexec/PlistBuddy -c "Print" "$path" || true
           }
 
@@ -137,30 +130,27 @@ PLIST
           make_entitlements "$ENT_APP"
           make_entitlements "$ENT_NSE"
 
-          # Обязательно прописать CODE_SIGN_ENTITLEMENTS для таргетов
+          # Ensure CODE_SIGN_ENTITLEMENTS set for both targets
           ruby -e "begin; require 'xcodeproj'; rescue LoadError; system('gem install xcodeproj --no-document') || exit(1); end"
           ruby - <<'RUBY'
             require 'xcodeproj'
             p = Xcodeproj::Project.open('Unity-iPhone.xcodeproj')
-            ents = {
+            map = {
               'Unity-iPhone' => 'Unity-iPhone/Unity-iPhone.entitlements',
               'OneSignalNotificationServiceExtension' => 'OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements'
             }
-            ents.each do |tname, ent|
-              t = p.targets.find { |x| x.name == tname }
-              next unless t
-              t.build_configurations.each do |cfg|
-                cfg.build_settings['CODE_SIGN_ENTITLEMENTS'] = ent
+            map.each do |tname, ent|
+              if (t = p.targets.find { |x| x.name == tname })
+                t.build_configurations.each { |cfg| cfg.build_settings['CODE_SIGN_ENTITLEMENTS'] = ent }
               end
             end
             p.save
 RUBY
 
-          # Проверка
           xcodebuild -project "$XCODE_PROJECT" -target "Unity-iPhone" -showBuildSettings | /usr/bin/grep CODE_SIGN_ENTITLEMENTS || true
           xcodebuild -project "$XCODE_PROJECT" -target "OneSignalNotificationServiceExtension" -showBuildSettings | /usr/bin/grep CODE_SIGN_ENTITLEMENTS || true
 
-      - name: Increment build number (TestFlight latest + 1)
+      - name: Increment build number (TestFlight +1)
         script: |
           set -e
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
