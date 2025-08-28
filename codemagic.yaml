@@ -1,66 +1,79 @@
 workflows:
-  unity-ios-lts:
-    name: Unity iOS (LTS preferred, OneSignal)
+  unity-ios:
+    name: Unity iOS (auto Unity version, Pro serial fallback)
     environment:
       groups:
-        - unity_pro_credentials           # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL (Pro ключ SC-…)
-        - app_store_credentials           # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
-        - certificate_credentials         # CERTIFICATE_PRIVATE_KEY (+ опц. CERTIFICATE_PASSWORD)
+        - unity_credentials            # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY (+ опц. CERTIFICATE_PASSWORD)
       vars:
-        # Укажи желаемый Unity на случай, если предустановленного нет
-        UNITY_VERSION: "6000.0.56f1"      # пример LTS; можно поменять на актуальный
-        UNITY_PROJECT_PATH: "ASO iOs 8 Merkur Space"       # твой подпроект с пробелами
-        IOS_EXPORT_PATH: "$UNITY_PROJECT_PATH/build/ios"
+        # Путь к твоему Unity-проекту (подпапка с пробелами поддерживается)
+        UNITY_PROJECT_PATH: "ASO iOs 8 Merkur Space"
+        # Абсолютный путь экспорта, чтобы не путаться с рабочей директорией
+        IOS_EXPORT_PATH: "$CM_BUILD_DIR/build/ios"
+
+        # Xcode параметры Unity-проекта по умолчанию
+        XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
+        XCODE_PROJECT: "Unity-iPhone.xcodeproj"
+        XCODE_SCHEME: "Unity-iPhone"
+
+        # Подписи
         BUNDLE_ID: "com.joams.merspace"
         NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
-        APP_STORE_APPLE_ID: "6751573211"
+        APP_STORE_APPLE_ID: "6751573211"   # числовой Apple ID в App Store Connect
+
       xcode: 16.4
       cocoapods: default
 
-    triggering:
-      events: [push, pull_request, tag]
-      branch_patterns:
-        - pattern: "develop"
-          include: true
-          source: true
-
     scripts:
-      - name: Pick preinstalled Unity if available
+      # 1) Находим проект и читаем требуемую версию Unity из ProjectVersion.txt
+      - name: Detect Unity project & required Unity version
         script: |
           set -e
-          BASE="/Applications/Unity/Hub/Editor"
-          if [ -d "$BASE" ]; then
-            echo "Preinstalled Unity editors:"; ls -1 "$BASE" || true
-            # Попробуем выбрать предустановленный LTS 2022.3.x (пример)
-            CAND=$(ls -1 "$BASE" | grep -E '^2022\.3\.' | sort -V | tail -n1 || true)
-            if [ -n "$CAND" ]; then
-              echo "Using preinstalled Unity $CAND"
-              echo "UNITY_VERSION=$CAND" >> "$CM_ENV"
-              echo "UNITY_HOME=$BASE/$CAND/Unity.app" >> "$CM_ENV"
-              echo "SKIP_UNITY_INSTALL=1" >> "$CM_ENV"
-            fi
+          ROOT="$(pwd)"
+          USE="$UNITY_PROJECT_PATH"
+          # если переменная не задана/путь неверный — попробуем найти проект автоматически
+          if [ ! -d "$USE/Assets" ] || [ ! -d "$USE/ProjectSettings" ]; then
+            USE="$(find "$ROOT" -maxdepth 3 -type d -name Assets -prune -print \
+               | while read -r d; do P="$(dirname "$d")"; [ -d "$P/ProjectSettings" ] && echo "$P"; done | head -n1)"
           fi
-          # Если не нашли — будем ставить указанную UNITY_VERSION
-          if ! grep -q '^UNITY_HOME=' "$CM_ENV"; then
-            echo "UNITY_HOME=$BASE/$UNITY_VERSION/Unity.app" >> "$CM_ENV"
-          fi
+          [ -n "$USE" ] || { echo "Unity project not found (no Assets & ProjectSettings)"; exit 1; }
+          echo "UNITY_PROJECT_PATH=$USE" | tee -a "$CM_ENV"
 
-      - name: Install Unity via Hub CLI (only if missing)
+          PV="$USE/ProjectSettings/ProjectVersion.txt"
+          [ -f "$PV" ] || { echo "No ProjectVersion.txt at $PV"; exit 1; }
+          REQ_VER="$(sed -n 's/^m_EditorVersion:[[:space:]]*//p' "$PV" | head -n1)"
+          [ -n "$REQ_VER" ] || { echo "Cannot parse Unity version from ProjectVersion.txt"; exit 1; }
+          echo "Detected required Unity version: $REQ_VER"
+          echo "UNITY_VERSION=$REQ_VER" | tee -a "$CM_ENV"
+          echo "UNITY_HOME=/Applications/Unity/Hub/Editor/$REQ_VER/Unity.app" | tee -a "$CM_ENV"
+          echo "IOS_EXPORT_PATH=$IOS_EXPORT_PATH" | tee -a "$CM_ENV"
+          mkdir -p "$IOS_EXPORT_PATH"
+
+      # 2) Пытаемся использовать предустановленный Unity этой версии, иначе — установим через Hub
+      - name: Use preinstalled Unity if present
         script: |
           set -e
-          if [ "${SKIP_UNITY_INSTALL:-0}" = "1" ] && [ -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
-            echo "Unity is preinstalled, skipping install."
+          if [ -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
+            echo "Using preinstalled Unity $UNITY_VERSION"
             exit 0
           fi
-          # Устанавливаем Hub и нужный Editor + iOS модуль
+          echo "Unity $UNITY_VERSION not preinstalled; will install."
+
+      - name: Install Unity via Hub CLI (exact required version + iOS module)
+        script: |
+          set -e
+          # Установим Unity Hub, если нужно
           if ! command -v unity-hub >/dev/null 2>&1; then
             brew install --cask unity-hub || true
           fi
+          # Ставим нужный Editor и iOS-модуль
           unity-hub install --version "$UNITY_VERSION" --module iOS || true
           [ -x "$UNITY_HOME/Contents/MacOS/Unity" ] || { echo "Unity not found at $UNITY_HOME"; exit 1; }
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
-      - name: Activate Unity (login, fallback to serial)
+      # 3) Активация лицензии: сначала логином (named user), если не прошло — по сериалу
+      - name: Activate Unity (login first, serial fallback)
         script: |
           set -e
           if "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
@@ -75,13 +88,81 @@ workflows:
             echo "✖ No valid license. Set UNITY_SERIAL or allow sign-in." && exit 1
           fi
 
-      - name: Sanity check BuildScript
+      # 4) Если нет Build.cs — создадим минимальный (с Force Resolve для EDM4U)
+      - name: Ensure BuildScript exists (auto-inject if missing)
         script: |
           set -e
+          mkdir -p "$UNITY_PROJECT_PATH/Assets/Editor"
           FILE="$UNITY_PROJECT_PATH/Assets/Editor/Build.cs"
-          [ -f "$FILE" ] || { echo "✖ $FILE not found. Commit BuildScript.BuildiOS."; exit 1; }
-          /usr/bin/grep -q "BuildScript.BuildiOS" "$FILE" || { echo "✖ Build.cs must contain method BuildScript.BuildiOS"; exit 1; }
+          if [ ! -f "$FILE" ]; then
+            cat > "$FILE" <<'CSHARP'
+// Assets/Editor/Build.cs (autogenerated)
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using UnityEditor;
+using UnityEditor.Build.Reporting;
 
+public static class BuildScript
+{
+    public static void BuildiOS()
+    {
+        var exportPath = Environment.GetEnvironmentVariable("IOS_EXPORT_PATH");
+        if (string.IsNullOrEmpty(exportPath)) exportPath = "build/ios";
+
+        TryForceResolve();
+
+        var scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
+        if (scenes.Length == 0)
+        {
+            scenes = UnityEditor.AssetDatabase.GetAllAssetPaths()
+                .Where(p => p.EndsWith(".unity", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (scenes.Length == 0) throw new Exception("No scenes found. Add scenes to Build Settings.");
+        }
+
+        if (Directory.Exists(exportPath)) Directory.Delete(exportPath, true);
+        Directory.CreateDirectory(exportPath);
+
+        var opts = new BuildPlayerOptions {
+            scenes = scenes,
+            locationPathName = exportPath,
+            target = BuildTarget.iOS,
+            options = BuildOptions.None
+        };
+
+        var report = BuildPipeline.BuildPlayer(opts);
+        if (report.summary.result != BuildResult.Succeeded)
+            throw new Exception($"iOS build failed: {report.summary.result}");
+        UnityEngine.Debug.Log("[BuildScript] Exported Xcode project to: " + exportPath);
+    }
+
+    static void TryForceResolve()
+    {
+        try {
+            var iosResolver = Type.GetType("Google.IOSResolver, Google.IOSResolver", false);
+            var resolverProp = iosResolver?.GetProperty("Resolver", BindingFlags.Public | BindingFlags.Static);
+            var resolver = resolverProp?.GetValue(null);
+            var force = resolver?.GetType().GetMethod("ForceResolve", BindingFlags.Public | BindingFlags.Instance);
+            force?.Invoke(resolver, null);
+        } catch {}
+
+        try {
+            var t = Type.GetType("GooglePlayServices.PlayServicesResolver, Google.JarResolver", false)
+                 ?? Type.GetType("GooglePlayServices.PlayServicesResolver, ExternalDependencyManager", false);
+            var m = t?.GetMethod("DoResolution", BindingFlags.Public | BindingFlags.Static);
+            m?.Invoke(null, null);
+        } catch {}
+    }
+}
+CSHARP
+            echo "Injected $FILE"
+          else
+            echo "Build.cs already exists."
+          fi
+
+      # 5) Экспорт Xcode-проекта
       - name: Export iOS project from Unity
         script: |
           set -e
@@ -92,6 +173,7 @@ workflows:
           echo "Exported to: $IOS_EXPORT_PATH"
           /bin/ls -la "$IOS_EXPORT_PATH" || true
 
+      # 6) Ставим Pods (Podfile должен появиться после EDM Resolve)
       - name: Install CocoaPods
         script: |
           set -e
@@ -100,7 +182,8 @@ workflows:
           pod repo update || true
           pod install
 
-      - name: Set up keychain & fetch signing (App + NSE)
+      # 7) Подпись: ключи + профили для App и NSE (OneSignal)
+      - name: Keychain & fetch signing
         script: |
           set -e
           keychain initialize
@@ -112,29 +195,32 @@ workflows:
             --certificate-key @env:CERTIFICATE_PRIVATE_KEY ${CERTIFICATE_PASSWORD:+--certificate-key-password "$CERTIFICATE_PASSWORD"}
           keychain add-certificates
 
-      - name: Apply provisioning profiles
+      - name: Apply provisioning to Xcode project
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
 
-      - name: Increment build number (TestFlight)
+      # 8) Номер билда от TestFlight
+      - name: Increment build number (from TestFlight)
         script: |
           set -e
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$IOS_EXPORT_PATH"
           agvtool new-version -all $((LATEST + 1))
 
+      # 9) Сборка IPA
       - name: Build IPA
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
-          if [ -d "Unity-iPhone.xcworkspace" ]; then
-            xcode-project build-ipa --workspace "Unity-iPhone.xcworkspace" --scheme "Unity-iPhone"
+          if [ -d "$XCODE_WORKSPACE" ]; then
+            xcode-project build-ipa --workspace "$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
           else
-            xcode-project build-ipa --project "Unity-iPhone.xcodeproj" --scheme "Unity-iPhone"
+            xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
           fi
 
+      # 10) (опционально) Освобождаем лицензию по завершении
       - name: Deactivate Unity license
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
