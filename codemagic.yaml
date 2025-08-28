@@ -1,12 +1,11 @@
 workflows:
   unity-ios:
-    name: Unity iOS (Merspace + OneSignal)
-    max_build_duration: 120
+    name: Unity iOS (6000.0.56f1)
 
     environment:
       groups:
         - unity_credentials              # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
-        - app_store_credentials          # App Store Connect API (p8/key_id/issuer)
+        - app_store_credentials          # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
       vars:
         UNITY_VERSION: "6000.0.56f1"
         UNITY_HOME: "/Applications/Unity/Hub/Editor/6000.0.56f1/Unity.app"
@@ -21,41 +20,33 @@ workflows:
       cocoapods: default
 
     scripts:
-      - name: Show Unity info
+      - name: Unity info
         script: |
           set -e
-          echo "UNITY_HOME=$UNITY_HOME"
+          echo "Using UNITY_HOME=$UNITY_HOME"
           "$UNITY_HOME/Contents/MacOS/Unity" -version
-          if [ -f "ProjectSettings/ProjectVersion.txt" ]; then
-            awk -F': ' '/m_EditorVersion/ {print "Project Unity: "$2; exit}' ProjectSettings/ProjectVersion.txt || true
-          fi
+          [ -f ProjectSettings/ProjectVersion.txt ] && awk -F': ' '/m_EditorVersion/{print "Project Unity: "$2}' ProjectSettings/ProjectVersion.txt || true
 
       - name: Activate Unity (serial)
         script: |
           set -e
-          "$UNITY_HOME/Contents/MacOS/Unity" \
-            -batchmode -nographics -quit -logFile - \
-            -serial "$UNITY_SERIAL" \
-            -username "$UNITY_EMAIL" \
-            -password "$UNITY_PASSWORD"
+          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
+            -serial "$UNITY_SERIAL" -username "$UNITY_EMAIL" -password "$UNITY_PASSWORD"
 
-      - name: Check BuildScript
+      - name: Check BuildScript presence
         script: |
           set -e
-          test -f "Assets/Editor/BuildScript.cs" || { echo "Missing Assets/Editor/BuildScript.cs"; exit 1; }
-          grep -qi "BuildScript.BuildiOS" "Assets/Editor/BuildScript.cs" || { echo "BuildScript.BuildiOS not found in BuildScript.cs"; exit 1; }
+          test -f "Assets/Editor/BuildScript.cs" || { echo "Assets/Editor/BuildScript.cs is missing"; exit 1; }
 
-      - name: Export iOS project from Unity
+      - name: Export iOS from Unity
         script: |
           set -e
-          "$UNITY_HOME/Contents/MacOS/Unity" \
-            -batchmode -nographics -quit -logFile - \
-            -projectPath "$(pwd)" \
-            -executeMethod BuildScript.BuildiOS
+          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
+            -projectPath "$(pwd)" -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
           ls -la "$IOS_EXPORT_PATH" || true
 
-      - name: Install CocoaPods (in export)
+      - name: Install CocoaPods (export)
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
@@ -63,60 +54,42 @@ workflows:
             pod repo update || true
             pod install
           else
-            echo "No Podfile in export. Запусти iOS Resolver (EDM4U) перед экспортом из Unity." >&2
+            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Resolve iOS deps in Unity (EDM4U) before build." >&2
             exit 1
           fi
 
-      - name: Fetch signing files (App + NSE)
+      - name: Fetch provisioning profiles (App + NSE)
         script: |
           set -e
-          # Создаст/скачает сертификаты и профили для обоих bundle id в стандартные папки
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" \
-            --type IOS_APP_STORE --platform IOS --create
-
-          echo "Certificates:"; ls -la "$HOME/Library/MobileDevice/Certificates" || true
-          echo "Profiles:"; ls -la "$HOME/Library/MobileDevice/Provisioning Profiles" || true
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create
+          ls -la "$HOME/Library/MobileDevice/Provisioning Profiles" || true
 
       - name: Import Apple certificates
-        script: keychain add-certificates
+        script: |
+          set -e
+          if keychain add-certificates; then
+            echo "Certificates added to keychain."
+          else
+            echo "ERROR: No .p12 found. Upload Apple Distribution certificate in Codemagic → Code signing." >&2
+            exit 1
+          fi
 
       - name: Apply provisioning & entitlements
         script: |
           set -e
           cd "$IOS_EXPORT_PATH"
-          # привяжем профили к проекту
           xcode-project use-profiles
-
-          # утилита: создать минимальный .entitlements, если файла нет/он пустой
-          ensure_plist() {
-            local f="$1"
-            if [ ! -s "$f" ]; then
-              mkdir -p "$(dirname "$f")"
-              cat >"$f" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-</dict>
-</plist>
-PLIST
-            fi
-          }
 
           ENT_APP="Unity-iPhone/Unity-iPhone.entitlements"
           ENT_NSE="OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements"
 
-          ensure_plist "$ENT_APP"
-          ensure_plist "$ENT_NSE"
-
-          for ENT in "$ENT_APP" "$ENT_NSE"; do
-            /usr/libexec/PlistBuddy -c "Delete :com.apple.security.application-groups" "$ENT" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups array" "$ENT"
-            /usr/libexec/PlistBuddy -c "Add :com.apple.security.application-groups:0 string $APP_GROUP" "$ENT"
-            echo "Entitlements in $ENT:"
-            /usr/libexec/PlistBuddy -c "Print" "$ENT" || true
+          for f in "$ENT_APP" "$ENT_NSE"; do
+            mkdir -p "$(dirname "$f")"
+            [ -s "$f" ] || /usr/bin/plutil -create xml1 "$f"
+            /usr/bin/plutil -remove com.apple.security.application-groups "$f" 2>/dev/null || true
+            /usr/bin/plutil -insert com.apple.security.application-groups -json "[\"$APP_GROUP\"]" "$f"
+            echo "Entitlements in $f:"; /usr/bin/plutil -p "$f" || true
           done
 
       - name: Increment build number
