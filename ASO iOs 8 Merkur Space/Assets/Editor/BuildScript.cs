@@ -1,42 +1,66 @@
 // Assets/Editor/Build.cs
-#if UNITY_EDITOR
+using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 
 public static class BuildScript
 {
-    // Unity будет вызывать этот метод: -executeMethod BuildScript.BuildiOS
+    [MenuItem("CI/Build iOS")]
     public static void BuildiOS()
     {
+        // Куда выгружать Xcode-проект
+        var exportPath = Environment.GetEnvironmentVariable("IOS_EXPORT_PATH");
+        if (string.IsNullOrEmpty(exportPath)) exportPath = "build/ios";
+
+        // Попробуем запустить EDM4U Force Resolve, чтобы сгенерировался Podfile
+        TryForceResolve();
+
+        // Список сцен
         var scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
-        if (scenes.Length == 0) throw new System.Exception("No enabled scenes in Build Settings.");
+        if (scenes.Length == 0) throw new Exception("No scenes in Build Settings.");
 
-        var outPath = System.Environment.GetEnvironmentVariable("IOS_EXPORT_PATH") ?? "build/ios";
-        Directory.CreateDirectory(outPath);
+        // Чистим/готовим папку
+        if (Directory.Exists(exportPath)) Directory.Delete(exportPath, true);
+        Directory.CreateDirectory(exportPath);
 
-        // Базовые настройки iOS
-        PlayerSettings.SetScriptingBackend(BuildTargetGroup.iOS, ScriptingImplementation.IL2CPP);
-        PlayerSettings.SetArchitecture(BuildTargetGroup.iOS, 1); // ARM64
-        PlayerSettings.iOS.sdkVersion = iOSSdkVersion.DeviceSDK;
-        PlayerSettings.iOS.targetOSVersionString = "12.0";
-
-        // (опц.) Подменить bundle id из переменной окружения
-        var envBundleId = System.Environment.GetEnvironmentVariable("BUNDLE_ID");
-        if (!string.IsNullOrEmpty(envBundleId))
-            PlayerSettings.SetApplicationIdentifier(BuildTargetGroup.iOS, envBundleId);
-
+        // Сам билд (для iOS всегда экспорт Xcode-проекта)
         var opts = new BuildPlayerOptions {
             scenes = scenes,
-            locationPathName = outPath,
+            locationPathName = exportPath,
             target = BuildTarget.iOS,
             options = BuildOptions.None
         };
-
         var report = BuildPipeline.BuildPlayer(opts);
         if (report.summary.result != BuildResult.Succeeded)
-            throw new System.Exception($"Unity iOS export failed: {report.summary.result}");
+            throw new Exception($"iOS build failed: {report.summary.result}");
+        Console.WriteLine($"[BuildScript] Exported Xcode project to: {exportPath}");
+    }
+
+    // Пытаемся вызвать EDM4U iOS/PlayServices резолвер (если подключён в проекте)
+    static void TryForceResolve()
+    {
+        try
+        {
+            // Google.IOSResolver.Resolver.ForceResolve()
+            var iosResolver = Type.GetType("Google.IOSResolver, Google.IOSResolver", throwOnError: false);
+            var resolverProp = iosResolver?.GetProperty("Resolver", BindingFlags.Public | BindingFlags.Static);
+            var resolver = resolverProp?.GetValue(null);
+            var force = resolver?.GetType().GetMethod("ForceResolve", BindingFlags.Public | BindingFlags.Instance);
+            force?.Invoke(resolver, null);
+        }
+        catch {}
+
+        try
+        {
+            // GooglePlayServices.PlayServicesResolver.DoResolution()
+            var t = Type.GetType("GooglePlayServices.PlayServicesResolver, Google.JarResolver", throwOnError: false)
+                 ?? Type.GetType("GooglePlayServices.PlayServicesResolver, ExternalDependencyManager", throwOnError: false);
+            var m = t?.GetMethod("DoResolution", BindingFlags.Public | BindingFlags.Static);
+            m?.Invoke(null, null);
+        }
+        catch {}
     }
 }
-#endif

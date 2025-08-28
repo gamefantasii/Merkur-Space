@@ -3,12 +3,9 @@ workflows:
     name: Unity iOS (Pro, serial key)
     environment:
       groups:
-        # unity_credentials: UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL (SC-…)
-        - unity_credentials
-        # app_store_credentials: APP_STORE_CONNECT_ISSUER_ID / APP_STORE_CONNECT_KEY_IDENTIFIER / APP_STORE_CONNECT_PRIVATE_KEY (.p8)
-        - app_store_credentials
-        # certificate_credentials: CERTIFICATE_PRIVATE_KEY = ваш PEM RSA ключ (-----BEGIN RSA PRIVATE KEY-----)
-        - certificate_credentials
+        - unity_credentials            # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL (SC-…)
+        - app_store_credentials        # APP_STORE_CONNECT_ISSUER_ID / KEY_IDENTIFIER / PRIVATE_KEY (.p8)
+        - certificate_credentials      # CERTIFICATE_PRIVATE_KEY = -----BEGIN RSA PRIVATE KEY-----
       vars:
         UNITY_VERSION: "6000.1.5f1"
         UNITY_CHANGESET: "923722cbbcfc"
@@ -26,13 +23,11 @@ workflows:
       cocoapods: default
 
     scripts:
-      # Ставим нужную Unity + iOS-модуль (если ещё нет), задаём UNITY_HOME
       - name: Install Unity via Hub CLI (if missing)
         script: |
           set -e
           HUB="/Applications/Unity Hub.app/Contents/MacOS/Unity Hub"
           UNITY_HOME="/Applications/Unity/Hub/Editor/${UNITY_VERSION}/Unity.app"
-
           if [ ! -x "$UNITY_HOME/Contents/MacOS/Unity" ]; then
             echo "Unity $UNITY_VERSION not found, installing via Hub…"
             yes Y | "$HUB" -- --headless install --version "$UNITY_VERSION" --changeset "$UNITY_CHANGESET" -a arm64
@@ -40,16 +35,13 @@ workflows:
           else
             echo "Unity $UNITY_VERSION already present."
           fi
-
           echo "UNITY_HOME=$UNITY_HOME" >> "$CM_ENV"
           "$UNITY_HOME/Contents/MacOS/Unity" -version
 
-      # На всякий случай освобождаем залипшую активацию (если была)
       - name: Pre-clean Unity license (best effort)
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
 
-      # АКТИВАЦИЯ ПО СЕРИАЛУ (SC-…)
       - name: Activate Unity license (serial)
         script: |
           "$UNITY_HOME/Contents/MacOS/Unity" \
@@ -58,23 +50,37 @@ workflows:
             -username "${UNITY_EMAIL}" \
             -password "${UNITY_PASSWORD}"
 
-      # Экспорт iOS-проекта из Unity
       - name: Export iOS project from Unity
         script: |
+          set -e
           "$UNITY_HOME/Contents/MacOS/Unity" \
             -batchmode -nographics -quit -logFile - \
             -projectPath "$(pwd)" \
             -executeMethod BuildScript.BuildiOS
           echo "Exported to: $IOS_EXPORT_PATH"
+          # Диагностика: покажем структуру экспорта
+          /bin/ls -la "$IOS_EXPORT_PATH" || true
+          /usr/bin/find "$IOS_EXPORT_PATH" -maxdepth 1 -type f -name "Podfile" -print || true
 
-      # CocoaPods (OneSignal подтянется из Podfile, созданного EDM4U → iOS Resolver)
+      - name: Verify export & Podfile
+        script: |
+          set -e
+          if [ ! -d "$IOS_EXPORT_PATH" ]; then
+            echo "ERROR: Export path $IOS_EXPORT_PATH not found. Проверь BuildScript.BuildiOS и переменную IOS_EXPORT_PATH." && exit 1
+          fi
+          if [ ! -f "$IOS_EXPORT_PATH/Podfile" ]; then
+            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Убедись, что EDM4U/OneSignal установлены и Force Resolve сработал до/во время экспорта."
+            echo "Подсказка: проверь, что плагины EDM4U/OneSignal есть в проекте и их постпроцесс включён."
+            exit 1
+          fi
+
       - name: Install CocoaPods
         script: |
+          set -e
           cd "$IOS_EXPORT_PATH"
           pod repo update || true
           pod install
 
-      # Подписи: ключница + автоген профилей для App и NSE
       - name: Setup signing (keychain & provisioning profiles)
         script: |
           keychain initialize
@@ -82,20 +88,17 @@ workflows:
           app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform=IOS --create --certificate-key @env:CERTIFICATE_PRIVATE_KEY
           keychain add-certificates
 
-      # Применяем профили к Xcode-проекту
       - name: Apply provisioning profiles
         script: |
           cd "$IOS_EXPORT_PATH"
           xcode-project use-profiles
 
-      # Инкремент номера билда по TestFlight
       - name: Increment build number (TestFlight)
         script: |
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$IOS_EXPORT_PATH"
           agvtool new-version -all $((LATEST + 1))
 
-      # Сборка IPA
       - name: Build IPA
         script: |
           cd "$IOS_EXPORT_PATH"
@@ -106,7 +109,6 @@ workflows:
           fi
 
     publishing:
-      # Возвращаем лицензию после билда, чтобы не держать слот
       scripts:
         - name: Deactivate Unity license
           script: |
