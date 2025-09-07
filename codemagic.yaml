@@ -52,7 +52,7 @@ workflows:
           cd "$UNITY_IOS_DIR"
           agvtool new-version -all $((LATEST + 1))
 
-       - name: Build & export IPA (Automatic signing)
+      - name: Build & export IPA (Automatic signing)
         script: |
           set -euo pipefail
           ARCHIVE_PATH="$CM_BUILD_DIR/ios/xcarchive/$XCODE_SCHEME.xcarchive"
