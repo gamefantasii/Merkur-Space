@@ -52,8 +52,8 @@ workflows:
         script: |
           EXTRA=""
           if [ -n "${CERT_PWD:-}" ]; then EXTRA="--certificate-key-password='${CERT_PWD}'"; fi
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create $EXTRA
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --create $EXTRA
+          app-store-connect fetch-signing-files "com.joams.merspace" --type IOS_APP_STORE --create
+          app-store-connect fetch-signing-files "com.joams.merspace.OneSignalNotificationServiceExtension" --type IOS_APP_STORE --create
 
       - name: Use system default keychain
         script: keychain add-certificates
