@@ -1,125 +1,68 @@
 workflows:
   unity-ios:
-    name: Unity iOS (6000.0.56f1)
-
+    name: Unity iOS
+    max_build_duration: 120
+    integrations:
+      app_store_connect: joams   # добавил в Team settings
     environment:
+      unity: 6000.0.56f1                                # укажи нужную версию, если важно
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.joams.merspace           # <-- твой Bundle ID
       groups:
-        - unity_credentials              # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
-        - app_store_credentials          # APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
+        - unity_credentials                             # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL
       vars:
-        UNITY_VERSION: "6000.0.56f1"
-        UNITY_HOME: "/Applications/Unity/Hub/Editor/6000.0.56f1/Unity.app"
-
-        IOS_EXPORT_PATH: "build/ios"
-        BUNDLE_ID: "com.joams.merspace"
-        NSE_BUNDLE_ID: "com.joams.merspace.OneSignalNotificationServiceExtension"
-        APP_GROUP: "group.com.joams.merspace"
-        APP_STORE_APPLE_ID: "6751573211"
-
-      xcode: latest
-      cocoapods: default
-
+        UNITY_IOS_DIR: ios
+        XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
+        XCODE_SCHEME: "Unity-iPhone"
+        APP_STORE_APPLE_ID: 6751573211                  # <-- твой Apple ID приложения
     scripts:
-      - name: Unity info
+      - name: Activate Unity license
         script: |
-          set -e
-          echo "Using UNITY_HOME=$UNITY_HOME"
-          "$UNITY_HOME/Contents/MacOS/Unity" -version
-          [ -f ProjectSettings/ProjectVersion.txt ] && awk -F': ' '/m_EditorVersion/{print "Project Unity: "$2}' ProjectSettings/ProjectVersion.txt || true
+          $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
+            -serial "${UNITY_SERIAL}" \
+            -username "${UNITY_EMAIL}" \
+            -password "${UNITY_PASSWORD}"
 
-      - name: Activate Unity (serial)
+      - name: Export iOS project from Unity
         script: |
-          set -e
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-            -serial "$UNITY_SERIAL" -username "$UNITY_EMAIL" -password "$UNITY_PASSWORD"
+          $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
+            -projectPath . \
+            -executeMethod BuildScript.BuildIos \
+            -nographics
 
-      - name: Check BuildScript presence
+      - name: Install CocoaPods
         script: |
-          set -e
-          test -f "Assets/Editor/BuildScript.cs" || { echo "Assets/Editor/BuildScript.cs is missing"; exit 1; }
+          cd "$UNITY_IOS_DIR"
+          pod install
 
-      - name: Export iOS from Unity
-        script: |
-          set -e
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -nographics -quit -logFile - \
-            -projectPath "$(pwd)" -executeMethod BuildScript.BuildiOS
-          echo "Exported to: $IOS_EXPORT_PATH"
-          ls -la "$IOS_EXPORT_PATH" || true
-
-      - name: Install CocoaPods (export)
-        script: |
-          set -e
-          cd "$IOS_EXPORT_PATH"
-          if [ -f "Podfile" ]; then
-            pod repo update || true
-            pod install
-          else
-            echo "ERROR: Podfile not found in $IOS_EXPORT_PATH. Resolve iOS deps in Unity (EDM4U) before build." >&2
-            exit 1
-          fi
-
-      - name: Fetch provisioning profiles (App + NSE)
-        script: |
-          set -e
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create
-          ls -la "$HOME/Library/MobileDevice/Provisioning Profiles" || true
-
-      - name: Import Apple certificates
-        script: |
-          set -e
-          if keychain add-certificates; then
-            echo "Certificates added to keychain."
-          else
-            echo "ERROR: No .p12 found. Upload Apple Distribution certificate in Codemagic → Code signing." >&2
-            exit 1
-          fi
-
-      - name: Apply provisioning & entitlements
-        script: |
-          set -e
-          cd "$IOS_EXPORT_PATH"
-          xcode-project use-profiles
-
-          ENT_APP="Unity-iPhone/Unity-iPhone.entitlements"
-          ENT_NSE="OneSignalNotificationServiceExtension/OneSignalNotificationServiceExtension.entitlements"
-
-          for f in "$ENT_APP" "$ENT_NSE"; do
-            mkdir -p "$(dirname "$f")"
-            [ -s "$f" ] || /usr/bin/plutil -create xml1 "$f"
-            /usr/bin/plutil -remove com.apple.security.application-groups "$f" 2>/dev/null || true
-            /usr/bin/plutil -insert com.apple.security.application-groups -json "[\"$APP_GROUP\"]" "$f"
-            echo "Entitlements in $f:"; /usr/bin/plutil -p "$f" || true
-          done
+      - name: Apply provisioning profiles
+        script: xcode-project use-profiles
 
       - name: Increment build number
         script: |
-          set -e
-          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
-          cd "$IOS_EXPORT_PATH"
-          agvtool new-version -all $((LATEST + 1)) || true
+          BUILD_NUMBER=$(app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          cd "$UNITY_IOS_DIR"
+          agvtool new-version -all $((BUILD_NUMBER + 1))
 
-      - name: Build ipa
+      - name: Build IPA
         script: |
-          set -e
-          cd "$IOS_EXPORT_PATH"
-          if [ -d "Unity-iPhone.xcworkspace" ]; then
-            xcode-project build-ipa --workspace "Unity-iPhone.xcworkspace" --scheme "Unity-iPhone"
-          else
-            xcode-project build-ipa --project "Unity-iPhone.xcodeproj" --scheme "Unity-iPhone"
-          fi
-
-      - name: Deactivate Unity
-        script: |
-          "$UNITY_HOME/Contents/MacOS/Unity" -batchmode -quit -returnlicense -nographics || true
+          xcode-project build-ipa \
+            --workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
 
     artifacts:
-      - $IOS_EXPORT_PATH/*.ipa
+      - build/ios/ipa/*.ipa
       - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
 
     publishing:
       app_store_connect:
-        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
-        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
-        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        auth: integration
         submit_to_testflight: true
+      scripts:
+        - name: Deactivate Unity License
+          script: |
+            /Applications/Unity\ Hub.app/Contents/Frameworks/UnityLicensingClient_V1.app/Contents/MacOS/Unity.Licensing.Client \
+              --return-ulf \
+              --username "${UNITY_EMAIL}" \
+              --password "${UNITY_PASSWORD}"
