@@ -55,12 +55,14 @@ workflows:
 
       - name: Build & export IPA (Automatic signing)
         script: |
+          #!/usr/bin/env bash
           set -euo pipefail
+
           ARCHIVE_PATH="$CM_BUILD_DIR/ios/xcarchive/$XCODE_SCHEME.xcarchive"
           EXPORT_DIR="$CM_BUILD_DIR/build/ios/ipa"
           mkdir -p "$EXPORT_DIR"
 
-          # 1) Archive с автоматическим код-сайнингом и подгрузкой профилей из Developer Portal
+          # 1) Archive c автоматическим код-сайнингом
           xcodebuild \
             -workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
             -scheme "$XCODE_SCHEME" \
@@ -71,19 +73,19 @@ workflows:
             -allowProvisioningUpdates \
             archive
 
-          # 2) Export IPA с методом app-store
+          # 2) Export IPA (app-store-connect) + разрешаем подтягивать профили при экспорте
           cat > exportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>method</key><string>app-store</string>
+            <key>method</key><string>app-store-connect</string>
             <key>teamID</key><string>${TEAM_ID}</string>
             <key>signingStyle</key><string>automatic</string>
             <key>destination</key><string>export</string>
             <key>stripSwiftSymbols</key><true/>
-            <key>uploadBitcode</key><false/>
             <key>compileBitcode</key><false/>
+            <key>uploadBitcode</key><false/>
           </dict>
           </plist>
           EOF
@@ -91,9 +93,11 @@ workflows:
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportOptionsPlist exportOptions.plist \
-            -exportPath "$EXPORT_DIR"
+            -exportPath "$EXPORT_DIR" \
+            -allowProvisioningUpdates
 
           echo "IPA exported to: $EXPORT_DIR"
+
 
 
 
