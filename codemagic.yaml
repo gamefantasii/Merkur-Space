@@ -1,140 +1,95 @@
 workflows:
   unity-ios:
+    name: Unity iOS (auto signing via CERTIFICATE_PRIVATE_KEY)
+    max_build_duration: 120
+
     environment:
       xcode: latest
       cocoapods: default
       unity: 6000.0.56f1
-      ios_signing:
-        # Явно указываем, какие сертификаты/профили ставить
-        certificates:
-          - apple_distribution           # <- reference name сертификата из UI
-        provisioning_profiles:
-          - merspace_appstore           # <- reference name профиля app
-          - merspace_nse_appstore       # <- reference name профиля NSE
       groups:
-        - unity_credentials
         - app_store_credentials
+        - certificate_credentials
+        - unity_credentials
       vars:
+        # Bundle IDs и App Store Connect app ID
         BUNDLE_ID: com.joams.merspace
-        TEAM_ID: "7LB2476AFZ"
         NSE_BUNDLE_ID: com.joams.merspace.OneSignalNotificationServiceExtension
         APP_STORE_APPLE_ID: 6751573211
+
+        # Пути/схемы после экспорта Unity
         UNITY_IOS_DIR: ios
         XCODE_WORKSPACE: Unity-iPhone.xcworkspace
         XCODE_SCHEME: Unity-iPhone
 
+    triggering:
+      events: [push, tag, pull_request]
+      branch_patterns:
+        - pattern: "develop"
+          include: true
+          source: true
+
     scripts:
+      # 0) (опционально) если нужны system keychain и т.п.
+      - name: Set up keychain
+        script: keychain initialize
+
+      # 1) Активируем Unity Pro
       - name: Activate Unity license
         script: |
           $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
-            -serial "${UNITY_SERIAL}" -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
+            -serial "${UNITY_SERIAL}" \
+            -username "${UNITY_EMAIL}" \
+            -password "${UNITY_PASSWORD}"
 
+      # 2) Экспортируем iOS (Xcode-проект) из Unity
       - name: Export iOS project from Unity
         script: |
           $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
-            -projectPath . -executeMethod BuildScript.BuildIos -nographics
+            -projectPath . \
+            -executeMethod BuildScript.BuildIos \
+            -nographics
 
+      # 3) Ставим поды (OneSignal и пр.) и используем .xcworkspace
       - name: Install CocoaPods
         script: |
           cd "$UNITY_IOS_DIR"
           pod install
 
-      - name: Set up keychain & install identities from team storage
+      # 4) Получаем/создаём сертификат и профили (App Store) для app+NSE
+      - name: Fetch signing files (app + NSE) via CERTIFICATE_PRIVATE_KEY
         script: |
-          keychain initialize
-          keychain add-certificates        # <-- установит сертификаты и профили, которые ты задал в ios_signing
+          # Используем API-ключ из группы app_store_credentials
+          export APPSTORE_CONNECT_KEY_ID="$APP_STORE_CONNECT_KEY_IDENTIFIER"
+          export APPSTORE_CONNECT_ISSUER_ID="$APP_STORE_CONNECT_ISSUER_ID"
+          export APPSTORE_CONNECT_PRIVATE_KEY="$APP_STORE_CONNECT_PRIVATE_KEY"
 
+          # Создаст (при необходимости) Apple Distribution сертификат,
+          # соберёт .p12 с паролем и создаст/подтянет App Store профили
+          app-store-connect fetch-signing-files "$BUNDLE_ID"     --type IOS_APP_STORE --platform IOS --create --certificate-key-password='232425'
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --certificate-key-password='232425'
+
+      # 5) Устанавливаем сертификаты/профили в кейчейн билд-агента
+      - name: Use system default keychain
+        script: keychain add-certificates
+
+      # 6) Применяем профили к Xcode-проекту (app + NSE)
       - name: Apply provisioning profiles to Xcode project
         script: xcode-project use-profiles
 
-      - name: Increment build number
+      # 7) Инкрементим build number на базе TestFlight/App Store
+      - name: Increment build number safely
         script: |
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$UNITY_IOS_DIR"
           agvtool new-version -all $((LATEST + 1))
 
-      - name: Build & export IPA (Automatic signing)
+      # 8) Собираем IPA (через workspace)
+      - name: Build ipa for distribution
         script: |
-          #!/usr/bin/env bash
-          #!/usr/bin/env bash
-          set -euo pipefail
-
-          ARCHIVE_PATH="$CM_BUILD_DIR/ios/xcarchive/$XCODE_SCHEME.xcarchive"
-          EXPORT_DIR="$CM_BUILD_DIR/build/ios/ipa"
-          mkdir -p "$EXPORT_DIR"
-
-          # 1) Соберём архив (Release, automatic signing)
-          xcodebuild \
-            -workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
-            -scheme "$XCODE_SCHEME" \
-            -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
-            -allowProvisioningUpdates \
-            archive
-
-          # 2) Поставим сертификаты/профили из team storage
-          keychain add-certificates
-
-          # 3) Найдём provisioning profile по bundle id (app и NSE)
-          APP_BUNDLE_ID="com.joams.merspace"
-          NSE_BUNDLE_ID="com.joams.merspace.OneSignalNotificationServiceExtension"
-
-          get_profile_name_for_bid () {
-            local BID="$1"
-            for f in ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision; do
-              TMP_PLIST=$(mktemp)
-              security cms -D -i "$f" -o "$TMP_PLIST" >/dev/null 2>&1 || continue
-              APPID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$TMP_PLIST" 2>/dev/null || echo "")
-              NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$TMP_PLIST" 2>/dev/null || echo "")
-              rm -f "$TMP_PLIST"
-              if [[ "$APPID" == *".$BID" || "$APPID" == "$BID" ]]; then
-                echo "$NAME"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          APP_PROFILE_NAME=$(get_profile_name_for_bid "$APP_BUNDLE_ID")
-          NSE_PROFILE_NAME=$(get_profile_name_for_bid "$NSE_BUNDLE_ID" || true)
-
-          echo "Using provisioning profiles:"
-          echo "  App: ${APP_PROFILE_NAME:-<not found>}"
-          echo "  NSE: ${NSE_PROFILE_NAME:-<not found>}"
-
-          # 4) Сформируем exportOptions.plist
-          cat > exportOptions.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key><string>app-store</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>destination</key><string>export</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${APP_BUNDLE_ID}</key><string>${APP_PROFILE_NAME}</string>
-              $( [ -n "${NSE_PROFILE_NAME:-}" ] && echo "<key>${NSE_BUNDLE_ID}</key><string>${NSE_PROFILE_NAME}</string>" )
-            </dict>
-          </dict>
-          </plist>
-          EOF
-
-          # 5) Export IPA
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportOptionsPlist exportOptions.plist \
-            -exportPath "$EXPORT_DIR"
-
-          echo "IPA exported to: $EXPORT_DIR"
-
-
-
-
-
+          xcode-project build-ipa \
+            --workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
 
     artifacts:
       - build/ios/ipa/*.ipa
@@ -142,6 +97,7 @@ workflows:
 
     publishing:
       app_store_connect:
+        # Публикуем через API-ключ (как у вас было)
         api_key: $APP_STORE_CONNECT_PRIVATE_KEY
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
