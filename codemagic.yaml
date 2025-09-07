@@ -1,23 +1,23 @@
 workflows:
   unity-ios:
-    name: Unity iOS
-    max_build_duration: 120
-
     environment:
       xcode: latest
       cocoapods: default
       unity: 6000.0.56f1
       ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.joams.merspace
+        # Явно указываем, какие сертификаты/профили ставить
+        certificates:
+          - apple_distribution           # <- reference name сертификата из UI
+        provisioning_profiles:
+          - merspace_appstore           # <- reference name профиля app
+          - merspace_nse_appstore       # <- reference name профиля NSE
       groups:
-        - unity_credentials                 # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
-        - app_store_credentials             # APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_PRIVATE_KEY
+        - unity_credentials
+        - app_store_credentials
       vars:
-        TEAM_ID: "7LB2476AFZ"    # <<< ВСТАВЬ сюда свой Team ID (10 символов)
-        APP_STORE_APPLE_ID: 6751573211
         BUNDLE_ID: com.joams.merspace
         NSE_BUNDLE_ID: com.joams.merspace.OneSignalNotificationServiceExtension
+        APP_STORE_APPLE_ID: 6751573211
         UNITY_IOS_DIR: ios
         XCODE_WORKSPACE: Unity-iPhone.xcworkspace
         XCODE_SCHEME: Unity-iPhone
@@ -26,59 +26,25 @@ workflows:
       - name: Activate Unity license
         script: |
           $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
-            -serial "${UNITY_SERIAL}" \
-            -username "${UNITY_EMAIL}" \
-            -password "${UNITY_PASSWORD}"
+            -serial "${UNITY_SERIAL}" -username "${UNITY_EMAIL}" -password "${UNITY_PASSWORD}"
 
       - name: Export iOS project from Unity
         script: |
           $UNITY_HOME/Contents/MacOS/Unity -batchmode -quit -logFile \
-            -projectPath . \
-            -executeMethod BuildScript.BuildIos \
-            -nographics
+            -projectPath . -executeMethod BuildScript.BuildIos -nographics
 
       - name: Install CocoaPods
         script: |
           cd "$UNITY_IOS_DIR"
           pod install
 
-      - name: Set up keychain
-        script: keychain initialize
-
-      # ---- 1) Задавим bundle id и team прямо в проекте (на всякий случай) ----
-      - name: Force bundle id and team in Xcode project
+      - name: Set up keychain & install identities from team storage
         script: |
-          PBX="$UNITY_IOS_DIR/Unity-iPhone.xcodeproj/project.pbxproj"
-          # Проставим DEVELOPMENT_TEAM
-          if [ -n "$TEAM_ID" ]; then
-            /usr/bin/sed -i '' -E "s/DEVELOPMENT_TEAM = [A-Z0-9]{10};/DEVELOPMENT_TEAM = $TEAM_ID;/g" "$PBX"
-          fi
-          # Проставим PRODUCT_BUNDLE_IDENTIFIER для основного таргета
-          /usr/bin/sed -i '' -E "s/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" "$PBX" || true
-
-      # ---- 2) Получим/создадим профили ЧЕРЕЗ API-ключ + привязка к Team ----
-      - name: Fetch signing files (App + NSE) with Team ID
-        script: |
-          export APPSTORE_CONNECT_KEY_ID="$APP_STORE_CONNECT_KEY_IDENTIFIER"
-          export APPSTORE_CONNECT_ISSUER_ID="$APP_STORE_CONNECT_ISSUER_ID"
-          export APPSTORE_CONNECT_PRIVATE_KEY="$APP_STORE_CONNECT_PRIVATE_KEY"
-
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --team-id "$TEAM_ID"
-          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --team-id "$TEAM_ID"
-
-      - name: Use system default keychain
-        script: keychain add-certificates
+          keychain initialize
+          keychain add-certificates        # <-- установит сертификаты и профили, которые ты задал в ios_signing
 
       - name: Apply provisioning profiles to Xcode project
         script: xcode-project use-profiles
-
-      # ---- 3) Диагностика, чтобы видеть, что реально берёт Xcode ----
-      - name: Debug signing context
-        script: |
-          echo "== Schemes =="; cd "$UNITY_IOS_DIR"; xcodebuild -list
-          echo "== Build settings (bundle id) =="; xcodebuild -showBuildSettings -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" | grep -m1 PRODUCT_BUNDLE_IDENTIFIER || true
-          echo "== Team setting =="; grep -n "DEVELOPMENT_TEAM" Unity-iPhone.xcodeproj/project.pbxproj | head -n 3 || true
-          echo "== Installed provisioning profiles on agent =="; ls -1 ~/Library/MobileDevice/Provisioning\ Profiles || true
 
       - name: Increment build number
         script: |
@@ -88,9 +54,8 @@ workflows:
 
       - name: Build IPA
         script: |
-          xcode-project build-ipa \
-            --workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
-            --scheme "$XCODE_SCHEME"
+          xcode-project build-ipa --workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" --scheme "$XCODE_SCHEME"
+
 
     artifacts:
       - build/ios/ipa/*.ipa
