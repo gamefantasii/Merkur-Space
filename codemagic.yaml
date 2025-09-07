@@ -16,7 +16,7 @@ workflows:
         - app_store_credentials
       vars:
         BUNDLE_ID: com.joams.merspace
-	TEAM_ID: "7LB2476AFZ"
+        TEAM_ID: "7LB2476AFZ"
         NSE_BUNDLE_ID: com.joams.merspace.OneSignalNotificationServiceExtension
         APP_STORE_APPLE_ID: 6751573211
         UNITY_IOS_DIR: ios
