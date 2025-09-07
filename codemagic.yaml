@@ -2,20 +2,29 @@ workflows:
   unity-ios:
     name: Unity iOS
     max_build_duration: 120
+
     integrations:
-      app_store_connect: joams   # добавил в Team settings
+      app_store_connect: joams   # имя интеграции в Codemagic → Team settings → Integrations
+
     environment:
-      unity: 6000.0.56f1                                # укажи нужную версию, если важно
+      xcode: latest
+      cocoapods: default
+      unity: 6000.0.56f1          # оставил твою версию Unity; при необходимости поменяй на точную версию проекта
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.joams.merspace           # <-- твой Bundle ID
+        bundle_identifier: com.joams.merspace
       groups:
-        - unity_credentials                             # UNITY_EMAIL / UNITY_PASSWORD / UNITY_SERIAL
+        - unity_credentials       # должен содержать UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
       vars:
+        APP_STORE_APPLE_ID: 6751573211
+        BUNDLE_ID: com.joams.merspace
+        NSE_BUNDLE_ID: com.joams.merspace.OneSignalNotificationServiceExtension
         UNITY_IOS_DIR: ios
-        XCODE_WORKSPACE: "Unity-iPhone.xcworkspace"
-        XCODE_SCHEME: "Unity-iPhone"
-        APP_STORE_APPLE_ID: 6751573211                  # <-- твой Apple ID приложения
+        XCODE_WORKSPACE: Unity-iPhone.xcworkspace
+        XCODE_SCHEME: Unity-iPhone
+        # (необязательно) если нужен пароль для экспортируемых сертификатов:
+        # CERT_PWD: "232425"
+
     scripts:
       - name: Activate Unity license
         script: |
@@ -31,19 +40,33 @@ workflows:
             -executeMethod BuildScript.BuildIos \
             -nographics
 
-      - name: Install CocoaPods
+      - name: Install CocoaPods (for OneSignal + Unity iOS)
         script: |
           cd "$UNITY_IOS_DIR"
           pod install
 
-      - name: Apply provisioning profiles
+      - name: Set up keychain
+        script: keychain initialize
+
+      - name: Fetch signing files (App + NSE)
+        script: |
+          EXTRA=""
+          if [ -n "${CERT_PWD:-}" ]; then EXTRA="--certificate-key-password='${CERT_PWD}'"; fi
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create $EXTRA
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --create $EXTRA
+
+      - name: Use system default keychain
+        script: keychain add-certificates
+
+      - name: Apply provisioning profiles to the Xcode project
         script: xcode-project use-profiles
 
       - name: Increment build number
         script: |
-          BUILD_NUMBER=$(app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          # берём последний номер из TestFlight; если пусто — из App Store; если и там пусто — 0
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$UNITY_IOS_DIR"
-          agvtool new-version -all $((BUILD_NUMBER + 1))
+          agvtool new-version -all $((LATEST + 1))
 
       - name: Build IPA
         script: |
@@ -59,10 +82,13 @@ workflows:
       app_store_connect:
         auth: integration
         submit_to_testflight: true
+
+      # корректное возвращение лицензии Unity (с fallback)
       scripts:
-        - name: Deactivate Unity License
+        - name: Deactivate Unity license
           script: |
             /Applications/Unity\ Hub.app/Contents/Frameworks/UnityLicensingClient_V1.app/Contents/MacOS/Unity.Licensing.Client \
               --return-ulf \
               --username "${UNITY_EMAIL}" \
-              --password "${UNITY_PASSWORD}"
+              --password "${UNITY_PASSWORD}" \
+              || $UNITY_HOME/Contents/MacOS/Unity -quit -batchmode -returnlicense || true
