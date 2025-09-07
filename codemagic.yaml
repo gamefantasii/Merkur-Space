@@ -62,41 +62,77 @@ workflows:
           EXPORT_DIR="$CM_BUILD_DIR/build/ios/ipa"
           mkdir -p "$EXPORT_DIR"
 
-          # 1) Archive c автоматическим код-сайнингом
-          xcodebuild \
-            -workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
-            -scheme "$XCODE_SCHEME" \
-            -configuration Release \
-            -archivePath "$ARCHIVE_PATH" \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
-            -allowProvisioningUpdates \
-            archive
+          # Убедимся, что сертификаты/профили из team storage установлены в систему
+          # (должны быть заданы в environment.ios_signing)
+          keychain add-certificates
 
-          # 2) Export IPA (app-store-connect) + разрешаем подтягивать профили при экспорте
+          # Найдём по факту ИМЕНА профилей, соответствующих нашим bundle id
+          APP_BUNDLE_ID="com.joams.merspace"
+          NSE_BUNDLE_ID="com.joams.merspace.OneSignalNotificationServiceExtension"
+
+          get_profile_name_for_bid () {
+            local BID="$1"
+            local NAME=""
+            for f in ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision; do
+              # распакуем в plist
+              TMP_PLIST=$(mktemp)
+              security cms -D -i "$f" -o "$TMP_PLIST" >/dev/null 2>&1 || continue
+              APPID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$TMP_PLIST" 2>/dev/null || echo "")
+              NAME_CAND=$(/usr/libexec/PlistBuddy -c "Print :Name" "$TMP_PLIST" 2>/dev/null || echo "")
+              rm -f "$TMP_PLIST"
+              # application-identifier выглядит как TEAMID.bundle.id
+              if [[ "$APPID" == *".$BID" || "$APPID" == "$BID" || "$APPID" == *".$BID"* ]]; then
+                NAME="$NAME_CAND"
+                echo "$NAME"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          APP_PROFILE_NAME=$(get_profile_name_for_bid "$APP_BUNDLE_ID")
+          NSE_PROFILE_NAME=$(get_profile_name_for_bid "$NSE_BUNDLE_ID" || true)
+
+          echo "Using provisioning profiles:"
+          echo "  App: ${APP_PROFILE_NAME:-<not found>}"
+          echo "  NSE: ${NSE_PROFILE_NAME:-<not found>}"
+
+          if [ -z "${APP_PROFILE_NAME:-}" ]; then
+            echo "ERROR: App Store provisioning profile for $APP_BUNDLE_ID not found among installed profiles." >&2
+            ls -1 ~/Library/MobileDevice/Provisioning\ Profiles || true
+            exit 1
+          fi
+
+          # Сформируем exportOptions.plist для ручного экспорта
           cat > exportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>method</key><string>app-store-connect</string>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>manual</string>
             <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>automatic</string>
             <key>destination</key><string>export</string>
             <key>stripSwiftSymbols</key><true/>
             <key>compileBitcode</key><false/>
             <key>uploadBitcode</key><false/>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${APP_BUNDLE_ID}</key><string>${APP_PROFILE_NAME}</string>
+              $( [ -n "${NSE_PROFILE_NAME:-}" ] && echo "<key>${NSE_BUNDLE_ID}</key><string>${NSE_PROFILE_NAME}</string>" )
+            </dict>
           </dict>
           </plist>
           EOF
 
+          # Экспортируем IPA, НЕ требуя аккаунта (используем уже установленные профили)
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportOptionsPlist exportOptions.plist \
-            -exportPath "$EXPORT_DIR" \
-            -allowProvisioningUpdates
+            -exportPath "$EXPORT_DIR"
 
           echo "IPA exported to: $EXPORT_DIR"
+
 
 
 
