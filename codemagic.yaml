@@ -3,27 +3,24 @@ workflows:
     name: Unity iOS
     max_build_duration: 120
 
-    integrations:
-      app_store_connect: joams   # имя интеграции в Codemagic → Team settings → Integrations
-
     environment:
       xcode: latest
       cocoapods: default
-      unity: 6000.0.56f1          # оставил твою версию Unity; при необходимости поменяй на точную версию проекта
+      unity: 6000.0.56f1
       ios_signing:
         distribution_type: app_store
         bundle_identifier: com.joams.merspace
       groups:
-        - unity_credentials       # должен содержать UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - unity_credentials                 # UNITY_EMAIL, UNITY_PASSWORD, UNITY_SERIAL
+        - app_store_credentials             # APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
+        TEAM_ID: "7LB2476AFZ"    # <<< ВСТАВЬ сюда свой Team ID (10 символов)
         APP_STORE_APPLE_ID: 6751573211
         BUNDLE_ID: com.joams.merspace
         NSE_BUNDLE_ID: com.joams.merspace.OneSignalNotificationServiceExtension
         UNITY_IOS_DIR: ios
         XCODE_WORKSPACE: Unity-iPhone.xcworkspace
         XCODE_SCHEME: Unity-iPhone
-        # (необязательно) если нужен пароль для экспортируемых сертификатов:
-        # CERT_PWD: "232425"
 
     scripts:
       - name: Activate Unity license
@@ -40,7 +37,7 @@ workflows:
             -executeMethod BuildScript.BuildIos \
             -nographics
 
-      - name: Install CocoaPods (for OneSignal + Unity iOS)
+      - name: Install CocoaPods
         script: |
           cd "$UNITY_IOS_DIR"
           pod install
@@ -48,22 +45,43 @@ workflows:
       - name: Set up keychain
         script: keychain initialize
 
-      - name: Fetch signing files (App + NSE)
+      # ---- 1) Задавим bundle id и team прямо в проекте (на всякий случай) ----
+      - name: Force bundle id and team in Xcode project
         script: |
-          EXTRA=""
-          if [ -n "${CERT_PWD:-}" ]; then EXTRA="--certificate-key-password='${CERT_PWD}'"; fi
-          app-store-connect fetch-signing-files "com.joams.merspace" --type IOS_APP_STORE --create
-          app-store-connect fetch-signing-files "com.joams.merspace.OneSignalNotificationServiceExtension" --type IOS_APP_STORE --create
+          PBX="$UNITY_IOS_DIR/Unity-iPhone.xcodeproj/project.pbxproj"
+          # Проставим DEVELOPMENT_TEAM
+          if [ -n "$TEAM_ID" ]; then
+            /usr/bin/sed -i '' -E "s/DEVELOPMENT_TEAM = [A-Z0-9]{10};/DEVELOPMENT_TEAM = $TEAM_ID;/g" "$PBX"
+          fi
+          # Проставим PRODUCT_BUNDLE_IDENTIFIER для основного таргета
+          /usr/bin/sed -i '' -E "s/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/PRODUCT_BUNDLE_IDENTIFIER = $BUNDLE_ID;/g" "$PBX" || true
+
+      # ---- 2) Получим/создадим профили ЧЕРЕЗ API-ключ + привязка к Team ----
+      - name: Fetch signing files (App + NSE) with Team ID
+        script: |
+          export APPSTORE_CONNECT_KEY_ID="$APP_STORE_CONNECT_KEY_IDENTIFIER"
+          export APPSTORE_CONNECT_ISSUER_ID="$APP_STORE_CONNECT_ISSUER_ID"
+          export APPSTORE_CONNECT_PRIVATE_KEY="$APP_STORE_CONNECT_PRIVATE_KEY"
+
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --team-id "$TEAM_ID"
+          app-store-connect fetch-signing-files "$NSE_BUNDLE_ID" --type IOS_APP_STORE --platform IOS --create --team-id "$TEAM_ID"
 
       - name: Use system default keychain
         script: keychain add-certificates
 
-      - name: Apply provisioning profiles to the Xcode project
+      - name: Apply provisioning profiles to Xcode project
         script: xcode-project use-profiles
+
+      # ---- 3) Диагностика, чтобы видеть, что реально берёт Xcode ----
+      - name: Debug signing context
+        script: |
+          echo "== Schemes =="; cd "$UNITY_IOS_DIR"; xcodebuild -list
+          echo "== Build settings (bundle id) =="; xcodebuild -showBuildSettings -workspace "$XCODE_WORKSPACE" -scheme "$XCODE_SCHEME" | grep -m1 PRODUCT_BUNDLE_IDENTIFIER || true
+          echo "== Team setting =="; grep -n "DEVELOPMENT_TEAM" Unity-iPhone.xcodeproj/project.pbxproj | head -n 3 || true
+          echo "== Installed provisioning profiles on agent =="; ls -1 ~/Library/MobileDevice/Provisioning\ Profiles || true
 
       - name: Increment build number
         script: |
-          # берём последний номер из TestFlight; если пусто — из App Store; если и там пусто — 0
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo 0)
           cd "$UNITY_IOS_DIR"
           agvtool new-version -all $((LATEST + 1))
@@ -80,10 +98,11 @@ workflows:
 
     publishing:
       app_store_connect:
-        auth: integration
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
 
-      # корректное возвращение лицензии Unity (с fallback)
       scripts:
         - name: Deactivate Unity license
           script: |
