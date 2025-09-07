@@ -56,33 +56,40 @@ workflows:
       - name: Build & export IPA (Automatic signing)
         script: |
           #!/usr/bin/env bash
+          #!/usr/bin/env bash
           set -euo pipefail
 
           ARCHIVE_PATH="$CM_BUILD_DIR/ios/xcarchive/$XCODE_SCHEME.xcarchive"
           EXPORT_DIR="$CM_BUILD_DIR/build/ios/ipa"
           mkdir -p "$EXPORT_DIR"
 
-          # Убедимся, что сертификаты/профили из team storage установлены в систему
-          # (должны быть заданы в environment.ios_signing)
+          # 1) Соберём архив (Release, automatic signing)
+          xcodebuild \
+            -workspace "$UNITY_IOS_DIR/$XCODE_WORKSPACE" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            -allowProvisioningUpdates \
+            archive
+
+          # 2) Поставим сертификаты/профили из team storage
           keychain add-certificates
 
-          # Найдём по факту ИМЕНА профилей, соответствующих нашим bundle id
+          # 3) Найдём provisioning profile по bundle id (app и NSE)
           APP_BUNDLE_ID="com.joams.merspace"
           NSE_BUNDLE_ID="com.joams.merspace.OneSignalNotificationServiceExtension"
 
           get_profile_name_for_bid () {
             local BID="$1"
-            local NAME=""
             for f in ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision; do
-              # распакуем в plist
               TMP_PLIST=$(mktemp)
               security cms -D -i "$f" -o "$TMP_PLIST" >/dev/null 2>&1 || continue
               APPID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" "$TMP_PLIST" 2>/dev/null || echo "")
-              NAME_CAND=$(/usr/libexec/PlistBuddy -c "Print :Name" "$TMP_PLIST" 2>/dev/null || echo "")
+              NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$TMP_PLIST" 2>/dev/null || echo "")
               rm -f "$TMP_PLIST"
-              # application-identifier выглядит как TEAMID.bundle.id
-              if [[ "$APPID" == *".$BID" || "$APPID" == "$BID" || "$APPID" == *".$BID"* ]]; then
-                NAME="$NAME_CAND"
+              if [[ "$APPID" == *".$BID" || "$APPID" == "$BID" ]]; then
                 echo "$NAME"
                 return 0
               fi
@@ -97,13 +104,7 @@ workflows:
           echo "  App: ${APP_PROFILE_NAME:-<not found>}"
           echo "  NSE: ${NSE_PROFILE_NAME:-<not found>}"
 
-          if [ -z "${APP_PROFILE_NAME:-}" ]; then
-            echo "ERROR: App Store provisioning profile for $APP_BUNDLE_ID not found among installed profiles." >&2
-            ls -1 ~/Library/MobileDevice/Provisioning\ Profiles || true
-            exit 1
-          fi
-
-          # Сформируем exportOptions.plist для ручного экспорта
+          # 4) Сформируем exportOptions.plist
           cat > exportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -113,9 +114,6 @@ workflows:
             <key>signingStyle</key><string>manual</string>
             <key>teamID</key><string>${TEAM_ID}</string>
             <key>destination</key><string>export</string>
-            <key>stripSwiftSymbols</key><true/>
-            <key>compileBitcode</key><false/>
-            <key>uploadBitcode</key><false/>
             <key>provisioningProfiles</key>
             <dict>
               <key>${APP_BUNDLE_ID}</key><string>${APP_PROFILE_NAME}</string>
@@ -125,13 +123,14 @@ workflows:
           </plist>
           EOF
 
-          # Экспортируем IPA, НЕ требуя аккаунта (используем уже установленные профили)
+          # 5) Export IPA
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportOptionsPlist exportOptions.plist \
             -exportPath "$EXPORT_DIR"
 
           echo "IPA exported to: $EXPORT_DIR"
+
 
 
 
